@@ -1,0 +1,3 @@
+include *rst LICENSE CHANGELOG.md MANIFEST.in
+recursive-include examples *.py
+recursive-include tests *.py
