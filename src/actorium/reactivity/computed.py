@@ -2,7 +2,7 @@ from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
 
-from ..actors import spawn
+from ..actors import Actor, spawn
 from .signals import SignalReader, signal
 
 __all__ = [
@@ -12,6 +12,8 @@ __all__ = [
 
 @asynccontextmanager
 async def computed[T, U, V](
+    type_: type[T],
+    /,
     func: Callable[[T, U], Coroutine[Any, Any, V]],
     reactive1: SignalReader[T],
     reactive2: SignalReader[U],
@@ -40,26 +42,34 @@ async def computed[T, U, V](
 
     initial = await func(value1, value2)
 
-    async with signal(initial=initial) as (result, set_result):
+    async with signal[type_](initial) as (result, set_result):
 
-        async def update_value1(msg: T) -> None:
-            nonlocal value1
-            value1 = msg
+        class Update1(Actor[T]):
+            async def receive(self, msg: T) -> None:
+                nonlocal value1
+                value1 = msg
 
-            new_value = await func(value1, value2)
-            await set_result(new_value)
+                new_value = await func(value1, value2)
+                await set_result(new_value)
 
-        async def update_value2(msg: U) -> None:
-            nonlocal value2
-            value2 = msg
+            def message_type(self) -> type[T]:
+                return reactive1.data_type()
 
-            new_value = await func(value1, value2)
-            await set_result(new_value)
+        class Update2(Actor[U]):
+            async def receive(self, msg: U) -> None:
+                nonlocal value2
+                value2 = msg
+
+                new_value = await func(value1, value2)
+                await set_result(new_value)
+
+            def message_type(self) -> type[U]:
+                return reactive2.data_type()
 
         async with (
             # Spawn two actors for receiving corresponding updates.
-            spawn(update_value1) as update1_actor,
-            spawn(update_value2) as update2_actor,
+            spawn(Update1) as (_, update1_actor),
+            spawn(Update2) as (_, update2_actor),
             # Subscribe to updates coming from both reactive objects.
             reactive1.subscribe(update1_actor),
             reactive2.subscribe(update2_actor),

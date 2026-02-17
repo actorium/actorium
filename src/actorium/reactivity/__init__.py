@@ -1,11 +1,11 @@
 from .computed import computed
-from .rpc import CallRpc, Rpc, rpc
+from .rpc import CallRpc, RpcActor, rpc
 from .signals import Get, SignalReader, SignalReaderMsg, Subscribe, Unsubscribe, signal
 
 __all__ = [
     # RPC.
     "CallRpc",
-    "Rpc",
+    "RpcActor",
     "rpc",
     # signal
     "Subscribe",

@@ -1,21 +1,22 @@
 #!/usr/bin/env python
 from anyio import run, sleep
 
-from actorium import ActorSystem, spawn
+from actorium import Actor, actor_system, spawn
 
 
-async def my_actor(msg: str) -> None:
-    "Simple actor that prints whatever it receives."
-    print(f"Received {msg} in actor.")
+class MyActor(Actor[str]):
+    async def receive(self, msg: str) -> None:
+        "Simple actor that prints whatever it receives."
+        print(f"Received {msg} in actor.")
 
 
 async def example() -> None:
-    async with ActorSystem.create():
+    async with actor_system():
         # Spawn actor and obtain a reference to it.
-        async with spawn(my_actor) as actor_ref:
+        async with spawn(MyActor) as (_, actor_ref):
             # Send messages to this actor through the reference.
-            await actor_ref.send("Hello")
-            await actor_ref.send("World")
+            actor_ref.tell("Hello")
+            actor_ref.tell("World")
 
             # This simple actor doesn't acknowledge delivery, allow some time
             # for the messages to be processed.

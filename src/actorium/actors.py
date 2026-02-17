@@ -1,54 +1,148 @@
-"""
-Implementation of cross-process reactivity.
-"""
-
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Coroutine
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass
-from typing import Any, Literal, Protocol, Self
-from uuid import UUID, uuid4
+import math
+from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from functools import cache
+from typing import TYPE_CHECKING, Literal, Protocol, assert_type
+from uuid import uuid4
 
+from anyio import create_memory_object_stream, create_task_group
 from pydantic import BaseModel, TypeAdapter
 
-from .system import ActorSystem, get_actor_system
+from .addresses import ActorId, Address
+from .system import current_actor_system
 
 __all__ = [
-    "ActorRegistration",
     "Actor",
     "spawn",
     "ActorRef",
 ]
 
 
-@dataclass
-class ActorRegistration[T]:
+class Actor[T](ABC):
+    def message_type(self) -> type[T]:
+        return self.receive.__annotations__["msg"]  # type:ignore
+
+    @abstractmethod
+    async def receive(self, msg: T, /) -> None: ...
+
+    @cache
+    def __type_adapter(self) -> TypeAdapter[T]:
+        type_adapter: TypeAdapter[T] = TypeAdapter(self.message_type())
+        return type_adapter
+
+    async def receive_serialized(self, serialized_msg: str, /) -> None:
+        msg: T = self.__type_adapter().validate_json(serialized_msg)
+        await self.receive(msg)
+
+
+class ActorFactory[A, T, **P](Protocol):
     """
-    Registration point.
+    Actor protocol: a class *definition*, not instance, which:
+
+    - can be initialized through the given paramspec (specified by `__call__`
+      here).
+    - has a `receive` method which accepts actor messages. Note that on the
+      class definition, `receive` is unbound, so it takes the actor `A` as
+      first argument.
     """
 
-    name: str
+    def __call__(self, *args: P.args, **kwars: P.kwargs) -> A: ...
+
+    def message_type(self, state: A) -> type[T]: ...
+
+    async def receive(self, state: A, msg: T, /) -> None: ...
+    async def receive_serialized(self, state: A, msg: str, /) -> None: ...
 
 
-class Actor[T](Protocol):
-    """
-    Actor protocol: anything can can receive messages of type `T`.
-    """
-
-    def __call__(self, msg: T, /) -> Coroutine[Any, Any, None] | None: ...
-
-
-def spawn[T](
-    implementation: Actor[T],
-    /,
-    system: ActorSystem | None = None,
-    register: ActorRegistration[T] | None = None,
-) -> AbstractAsyncContextManager[ActorRef[T]]:
+@asynccontextmanager
+async def spawn[A, T, **P](
+    factory: ActorFactory[A, T, P], /, *args: P.args, **kwargs: P.kwargs
+) -> AsyncGenerator[tuple[A, ActorRef[T]]]:
     """
     Context manager for spawning a new actor.
+
+    The first argument `factory` is the actor class to be instantiated, the
+    optional arguments and keyword arguments that follow are passed to the
+    factory to instantiate the actor.
+
+    Example usage::
+
+        class Collector(Actor[int]):
+            " Actor class. "
+            def __init__(self, param: str)-> None: ...
+            async def receive(self, msg: int) -> None: ...
+
+        async with spawn(Collector, param="some-param") as (actor, ref): ...
     """
-    return ActorRef[T].spawn(implementation, system=system, register=register)
+    system = current_actor_system()
+    actor = factory(*args, **kwargs)
+    actor_id = uuid4()
+    addresses = system.addresses()
+
+    message_type: type[T] = factory.message_type(actor)
+
+    sender, receiver = create_memory_object_stream[str](max_buffer_size=math.inf)
+
+    async def forward_messages() -> None:
+        """
+        Received actor message from over the network. Deserialize and feed
+        into this actor.
+        """
+        with receiver:
+            async for message in receiver:
+                try:
+                    await factory.receive_serialized(actor, message)
+
+                except Exception as e:
+                    breakpoint()
+                    print("got exception during message handling", e)  # TODO!
+
+    async with (
+        create_task_group() as tg,
+        sender,
+        current_actor_system().listen(actor_id=actor_id, callback=sender.send_nowait),
+    ):
+        tg.start_soon(forward_messages)
+
+        if TYPE_CHECKING:
+            ref = ActorRef[T](addresses=addresses, actor_id=actor_id)
+        else:
+            ref = ActorRef[message_type](addresses=addresses, actor_id=actor_id)
+
+        yield actor, ref
+
+        tg.cancel_scope.cancel()
+
+
+async def __test_type_inference() -> None:
+    """
+    Quick self-test for the type checker to ensure that the above type
+    inference works as expected.
+    """
+
+    class Collector(Actor[int]):
+        async def receive(self, msg: int) -> None: ...
+
+    async with spawn(Collector) as (a, b):
+        assert_type(a, Collector)
+        assert_type(b, ActorRef[int])
+
+    class CollectorWithArgs(Actor[int]):
+        def __init__(self, a: int, b: str) -> None: ...
+        async def receive(self, msg: int) -> None: ...
+
+    async with spawn(CollectorWithArgs, 1, b="text"):
+        pass
+
+
+class _Wrapper[T, R](Protocol):
+    def __call__(self, *, addresses: tuple[Address, ...], actor_id: ActorId) -> R:
+        "Constructor."
+
+    def tell(self, instance: ActorRef[T], message: T) -> None: ...
 
 
 class ActorRef[T](BaseModel):
@@ -61,95 +155,43 @@ class ActorRef[T](BaseModel):
     """
 
     # Discriminator, for when it's used in a union with other types.
-    type: Literal["actor-ref"] = "actor-ref"
+    type_: Literal["actor-ref"] = "actor-ref"
 
-    actor_system_uuid: UUID
-    actor_uuid: UUID
+    # List of addresses where this actor *might* be available. The easiest path
+    # is preferred if possible, but (especially) in case of a named actor, the
+    # actor might not be available there, and we can try the others.
+    # Tuple, because it needs to be hashable. (e.g., in the set of
+    # subscriptions in a 'computed').
+    addresses: tuple[Address, ...]
+
+    actor_id: ActorId
 
     model_config = {"frozen": True}
 
-    async def send(self, message: T) -> None:
+    def model_post_init(self, __context: object) -> None:
+        TypeAdapter(self.message_type())
+
+    @classmethod
+    def message_type(cls) -> type[T]:
+        try:
+            return cls.__pydantic_generic_metadata__["args"][0]  # type:ignore
+        except IndexError:
+            return cls.__bases__[0].__pydantic_generic_metadata__["args"][0]  # type:ignore
+
+    def wrap[R](self, type_: _Wrapper[T, R]) -> R:
+        return type_(
+            addresses=self.addresses,
+            actor_id=self.actor_id,
+        )
+
+    def tell(self, message: T) -> None:
         """
         Send message to the underlying actor.
         """
-        message_type = self.__pydantic_generic_metadata__["args"][0]
-        type_adapter = TypeAdapter(message_type)
+        type_adapter: TypeAdapter[T] = TypeAdapter(self.message_type())
 
-        serialized_message = type_adapter.dump_json(message)
+        serialized_message = type_adapter.dump_json(message).decode()
 
-        system = get_actor_system()
-
-        # TODO: If this actor is local, then don't serialized/deserialize, but
-        #       send straight to the actual actor.
-
-        await system.redis_client.rpush(
-            f"actor-queue:{self.actor_uuid}", serialized_message
+        current_actor_system().send_to_actor(
+            self.addresses, self.actor_id, serialized_message
         )
-        await system.redis_client.rpush(
-            f"actors-ready:{self.actor_system_uuid}", str(self.actor_uuid)
-        )
-
-    @classmethod
-    @asynccontextmanager
-    async def spawn(
-        cls,
-        implementation: Actor[T],
-        /,
-        system: ActorSystem | None = None,
-        register: ActorRegistration[T] | None = None,
-    ) -> AsyncGenerator[Self]:
-        """
-        Constructor: start a new actor and yield a referenec to that actor.
-        """
-        if system is None:
-            system = get_actor_system()
-
-        receive_annotations = implementation.__annotations__
-        message_type = receive_annotations["msg"]
-        type_adapter = TypeAdapter(message_type)
-
-        actor_uuid = uuid4()
-
-        async def send_serialized(message: str) -> None:
-            """
-            Received actor message from over the network. Deserialize and feed
-            into this actor.
-            """
-            decoded_message: T = type_adapter.validate_json(message)
-            result = implementation(decoded_message)
-            if isinstance(result, Coroutine):
-                await result
-
-        system._registered_actors[actor_uuid] = send_serialized
-
-        ref = cls(
-            actor_system_uuid=system._actor_system_uuid,
-            actor_uuid=actor_uuid,
-        )
-
-        try:
-            if register is None:
-                yield ref
-            else:
-                async with system._register_using_name(ref, register.name):
-                    yield ref
-        finally:
-            del system._registered_actors[actor_uuid]
-
-    @classmethod
-    async def from_registration(
-        cls, registration: ActorRegistration[T], system: ActorSystem | None = None
-    ) -> ActorRef[T] | None:
-        """
-        Get reference to an actor that was registered under the given
-        registration.
-        """
-        if system is None:
-            system = get_actor_system()
-
-        actor_data = await system._get_actor_data_using_name(registration.name)
-
-        if actor_data is None:
-            return None
-
-        return cls.model_validate(actor_data)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 from anyio import run
 
-from actorium import ActorSystem
+from actorium import actor_system, tcp_listener
 from actorium.reactivity import rpc
 
 
@@ -10,10 +10,13 @@ async def double_it(number: int) -> int:
 
 
 async def example() -> None:
-    async with ActorSystem.create():
+    async with (
+        actor_system(),
+        tcp_listener(host="localhost", port=9000),
+    ):
         # Register RPC call and obtain an actor reference.
-        async with rpc(double_it) as double_ref:
-            result = await double_ref.call(10)
+        async with rpc(int, int, double_it) as double_ref:
+            result = await double_ref.ask(10)
             print("result:", result)
 
 

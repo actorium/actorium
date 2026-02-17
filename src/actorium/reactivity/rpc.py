@@ -1,15 +1,17 @@
-import asyncio
+import types
 from collections.abc import Callable, Coroutine
-from contextlib import AbstractAsyncContextManager
-from typing import Any, Literal
+from contextlib import AsyncExitStack
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
+from anyio import fail_after
 from pydantic import BaseModel
 
-from ..actors import ActorRef, ActorRegistration, spawn
+from ..actors import Actor, ActorRef, spawn
+from .future import future
 
 __all__ = [
     "CallRpc",
-    "Rpc",
+    "RpcRef",
     "rpc",
 ]
 
@@ -26,36 +28,48 @@ class CallRpc[In, Out](BaseModel):
     reply_to: ActorRef[Out]
 
 
-class _RpcActor[In, Out]:
+class RpcActor[In, Out](Actor[CallRpc[In, Out]]):
     def __init__(self, func: Callable[[In], Coroutine[Any, Any, Out]]) -> None:
         self.func = func
 
+    def message_type(self) -> type[CallRpc[In, Out]]:
+        in_type, out_type = get_args(self.__orig_class__)  # type:ignore
+        return CallRpc[in_type, out_type]  # type:ignore
+
     async def receive(self, msg: CallRpc[In, Out]) -> None:
+        # TODO: Our introspection is not able to pick up the `msg` type here
+        #       due to the generics...
+
         result = await self.func(msg.input)
-        await msg.reply_to.send(result)
+        msg.reply_to.tell(result)
 
 
-class Rpc[In, Out](ActorRef[CallRpc[In, Out]]):
+class RpcRef[In, Out](ActorRef[CallRpc[In, Out]]):
     """
     Reference to an RPC actor with helper methods for Calling remote functions.
     """
 
-    async def call(self, value: In) -> Out:
-        f = asyncio.Future[Out]()
+    @classmethod
+    def message_type(cls) -> type:
+        in_type, out_type = cls.__pydantic_generic_metadata__["args"]
+        return CallRpc[in_type, out_type]  # type:ignore
 
-        def get_result(msg: Out) -> None:
-            f.set_result(msg)
+    async def ask(self, value: In, timeout: float | None = None) -> Out:
+        if TYPE_CHECKING:
+            async with future[Out]() as (f, reply_to):
+                self.tell(CallRpc[In, Out](input=value, reply_to=reply_to))
+                with fail_after(timeout):
+                    return await f.result()
+        else:
+            in_type, out_type = self.__pydantic_generic_metadata__["args"]
 
-        async with spawn(get_result) as reply_to:
-            await self.send(CallRpc[In, Out](input=value, reply_to=reply_to))
-            return await f
+            async with future[out_type]() as (f, reply_to):
+                self.tell(CallRpc[in_type, out_type](input=value, reply_to=reply_to))
+                with fail_after(timeout):
+                    return await f.result()
 
 
-def rpc[In, Out](
-    func: Callable[[In], Coroutine[Any, Any, Out]],
-    /,
-    register: ActorRegistration[Rpc[In, Out]] | None = None,
-) -> AbstractAsyncContextManager[Rpc[In, Out]]:
+class rpc[In, Out]:
     """
     Register a new RPC actor.
 
@@ -64,8 +78,32 @@ def rpc[In, Out](
         async def double_it(value: int) -> int:
             return value * 2
 
-        async with rpc(double_it) as double_actor:
-            assert await double_actor.call(2) == 4
+        async with rpc[int, int](double_it) as double_actor:
+            assert await double_actor.ask(2) == 4
     """
-    rpc_actor = _RpcActor[In, Out](func)
-    return Rpc[In, Out].spawn(rpc_actor.receive, register=register)
+
+    def __init__(self, func: Callable[[In], Coroutine[Any, Any, Out]]) -> None:
+        self.func = func
+
+    async def __aenter__(self) -> RpcRef[In, Out]:
+        self._stack = await AsyncExitStack().__aenter__()
+
+        if TYPE_CHECKING:
+            rpc_actor, ref = await self._stack.enter_async_context(
+                spawn(RpcActor[In, Out], self.func)
+            )
+            return ref.wrap(RpcRef[In, Out])
+        else:
+            in_type, out_type = get_args(self.__orig_class__)
+            rpc_actor, ref = await self._stack.enter_async_context(
+                spawn(RpcActor[in_type, out_type], self.func)
+            )
+            return ref.wrap(RpcRef[in_type, out_type])
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: types.TracebackType | None,
+    ) -> bool | None:
+        return await self._stack.__aexit__(exc_type, exc_value, traceback)
