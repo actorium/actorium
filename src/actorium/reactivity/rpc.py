@@ -1,15 +1,16 @@
-import asyncio
 from collections.abc import Callable, Coroutine
-from contextlib import AbstractAsyncContextManager
-from typing import Any, Literal
+from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator, Literal
 
+from anyio import fail_after
 from pydantic import BaseModel
 
-from ..actors import ActorRef, ActorRegistration, spawn
+from ..actors import Actor, ActorRef, spawn
+from .future import create_future
 
 __all__ = [
     "CallRpc",
-    "Rpc",
+    "RpcRef",
     "rpc",
 ]
 
@@ -26,36 +27,57 @@ class CallRpc[In, Out](BaseModel):
     reply_to: ActorRef[Out]
 
 
-class _RpcActor[In, Out]:
-    def __init__(self, func: Callable[[In], Coroutine[Any, Any, Out]]) -> None:
+class RpcActor[In, Out](Actor[CallRpc[In, Out]]):
+    def __init__(
+        self,
+        in_type: type[In],
+        out_type: type[Out],
+        func: Callable[[In], Coroutine[Any, Any, Out]],
+        /,
+    ) -> None:
+        self._in_type = in_type
+        self._out_type = out_type
         self.func = func
 
+    def message_type(self) -> type[CallRpc[In, Out]]:
+        return CallRpc[self._in_type, self._out_type]  # type:ignore
+
     async def receive(self, msg: CallRpc[In, Out]) -> None:
+        # TODO: Our introspection is not able to pick up the `msg` type here
+        #       due to the generics...
+
         result = await self.func(msg.input)
-        await msg.reply_to.send(result)
+        msg.reply_to.tell(result)
 
 
-class Rpc[In, Out](ActorRef[CallRpc[In, Out]]):
+class RpcRef[In, Out](ActorRef[CallRpc[In, Out]]):
     """
     Reference to an RPC actor with helper methods for Calling remote functions.
     """
 
-    async def call(self, value: In) -> Out:
-        f = asyncio.Future[Out]()
+    @classmethod
+    def message_type(cls) -> type:
+        in_type, out_type = cls.__pydantic_generic_metadata__["args"]
+        return CallRpc[in_type, out_type]
 
-        def get_result(msg: Out) -> None:
-            f.set_result(msg)
+    async def ask(self, value: In, timeout: float | None = None) -> Out:
+        generic_types = self.__pydantic_generic_metadata__["args"]
+        in_type = generic_types[0]
+        out_type = generic_types[1]
 
-        async with spawn(get_result) as reply_to:
-            await self.send(CallRpc[In, Out](input=value, reply_to=reply_to))
-            return await f
+        async with create_future(out_type) as (future, reply_to):
+            self.tell(CallRpc[in_type, out_type](input=value, reply_to=reply_to))
+            with fail_after(timeout):
+                return await future.result()
 
 
-def rpc[In, Out](
-    func: Callable[[In], Coroutine[Any, Any, Out]],
+@asynccontextmanager
+async def rpc[In, Out](
+    in_type: type[In],
+    out_type: type[Out],
     /,
-    register: ActorRegistration[Rpc[In, Out]] | None = None,
-) -> AbstractAsyncContextManager[Rpc[In, Out]]:
+    func: Callable[[In], Coroutine[Any, Any, Out]],
+) -> AsyncGenerator[RpcRef[In, Out]]:
     """
     Register a new RPC actor.
 
@@ -64,8 +86,8 @@ def rpc[In, Out](
         async def double_it(value: int) -> int:
             return value * 2
 
-        async with rpc(double_it) as double_actor:
-            assert await double_actor.call(2) == 4
+        async with rpc(int, int, double_it) as double_actor:
+            assert await double_actor.ask(2) == 4
     """
-    rpc_actor = _RpcActor[In, Out](func)
-    return Rpc[In, Out].spawn(rpc_actor.receive, register=register)
+    async with spawn(RpcActor[In, Out], in_type, out_type, func) as (rpc_actor, ref):
+        yield ref.wrap(RpcRef[in_type, out_type])

@@ -1,7 +1,8 @@
 # actorium
-A modern implementation of Actors in Python for distributed concurrency
 
-Warning: this library is a work in progress. Not recommended for use in
+A modern implementation of Actors in Python for distributed concurrency.
+
+Warning: this library is a work in progress. Not yet recommended for use in
 production.
 
 ## Installation
@@ -10,12 +11,13 @@ production.
 uv pip install actorium
 ```
 
-## Features
+## Key features
 
 - Pydantic based message serialization/deserialization.
-- Structured concurrency through anyio (for as much as structured concurrency
-  is possible in an actor system).
+- Build with support for static typing in mind (no `cast`, no `Any`)..
+- Structured concurrency for managing actor lifetimes.
 - Registration of actors under a given name.
+- Actor implementations for reactivity.
 
 
 ## Example usage
@@ -23,19 +25,27 @@ uv pip install actorium
 ```python
 #!/usr/bin/env python
 from anyio import run, sleep
-from actorium import ActorSystem, spawn
+from actorium import actor_system, spawn
 
-async def my_actor(msg: str) -> None:
+class MyActor:
     "Simple actor that prints whatever it receives."
-    print(f"Received {msg} in actor.")
+
+    async def receive(msg: str) -> None:
+        print(f"Received {msg} in actor.")
 
 async def example() -> None:
-    async with ActorSystem.create():
+    async with actor_system():
         # Spawn actor and obtain a reference to it.
-        async with spawn(my_actor) as actor_ref:
+        async with spawn(MyActor) as (my_actor, actor_ref):
+            # Thanks to type inference, Mypy knows that:
+            # - `my_actor` is of type `MyActor`.
+            # - `actor_ref` is of type `ActorRef[str]`.
+            # Further, messages are automatically serialized/deserialized using
+            # a Pydantic `TypeAdapter[str]`.
+
             # Send messages to this actor through the reference.
-            await actor_ref.send("Hello")
-            await actor_ref.send("World")
+            actor_ref.tell("Hello")
+            actor_ref.tell("World")
 
             # This simple actor doesn't acknowledge delivery, allow some time
             # for the messages to be processed.

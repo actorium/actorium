@@ -1,12 +1,13 @@
-import asyncio
+from __future__ import annotations
+
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
-from anyio import move_on_after
 from pydantic import BaseModel
 
-from ..actors import ActorRef, ActorRegistration, spawn
+from ..actors import Actor, ActorRef, spawn
+from .future import create_future
 
 __all__ = [
     # Messages.
@@ -38,10 +39,14 @@ class Get[T](BaseModel):
 type SignalReaderMsg[T] = Subscribe[T] | Unsubscribe[T] | Get[T]
 
 
-class _Signal[T]:
-    def __init__(self, initial: T) -> None:
+class _Signal[T](Actor[SignalReaderMsg[T]]):
+    def __init__(self, type_: type[T], initial: T) -> None:
+        self._type = type_
         self.value = initial
         self.subscriptions: set[ActorRef[T]] = set()
+
+    def message_type(self) -> type[T]:
+        return SignalReaderMsg[self._type]
 
     async def set(self, value: T) -> None:
         if self.value == value:
@@ -50,11 +55,11 @@ class _Signal[T]:
         self.value = value
 
         for subscription in self.subscriptions:
-            await subscription.send(value)
+            subscription.tell(value)
 
     async def receive(self, msg: SignalReaderMsg[T]) -> None:
         if isinstance(msg, Get):
-            await msg.reply_to.send(self.value)
+            msg.reply_to.tell(self.value)
         elif isinstance(msg, Subscribe):
             self.subscriptions.add(msg.actor)
         elif isinstance(msg, Unsubscribe):
@@ -68,14 +73,9 @@ class SignalReader[T](ActorRef[SignalReaderMsg[T]]):
     """
 
     async def get(self) -> T:
-        f = asyncio.Future[T]()
-
-        async def get_result(msg: T) -> None:
-            f.set_result(msg)
-
-        async with spawn(get_result) as reply_to:
-            await self.send(Get[T](reply_to=reply_to))
-            return await f
+        async with create_future(self.message_type()) as (future, reply_to):
+            self.tell(Get[T](reply_to=reply_to))
+            return await future.result()
 
     @asynccontextmanager
     async def subscribe(self, reply_to: ActorRef[T]) -> AsyncGenerator[None]:
@@ -83,12 +83,11 @@ class SignalReader[T](ActorRef[SignalReaderMsg[T]]):
         Subscribe to `ref` changes, tell the actor to send the updates to the
         given `reply_to` actor.
         """
-        await self.send(Subscribe[T](actor=reply_to))
+        self.tell(Subscribe[T](actor=reply_to))
         try:
             yield
         finally:
-            with move_on_after(1, shield=True):
-                await self.send(Unsubscribe[T](actor=reply_to))
+            self.tell(Unsubscribe[T](actor=reply_to))
 
 
 type SignalSetter[T] = Callable[[T], Coroutine[Any, Any, None]]
@@ -96,7 +95,7 @@ type SignalSetter[T] = Callable[[T], Coroutine[Any, Any, None]]
 
 @asynccontextmanager
 async def signal[T](
-    initial: T, register: ActorRegistration[T] | None = None
+    type_: type[T], /, initial: T
 ) -> AsyncGenerator[tuple[SignalReader[T], SignalSetter[T]]]:
     """
     Create a reactive signal. This produces an actor for observing the signal
@@ -104,13 +103,9 @@ async def signal[T](
 
     Usage::
 
-        async with signal(initial=...) as (count, set_count):
+        async with signal(int, initial=0) as (count, set_count):
             await set_count(...)
             value = count.get()
     """
-    signal = _Signal(initial)
-
-    async with SignalReader[T].spawn(
-        signal.receive, register=register
-    ) as signal_reader:
-        yield signal_reader, signal.set
+    async with spawn(_Signal[T], type_, initial) as (signal, ref):
+        yield ref.wrap(SignalReader[type_]), signal.set  # type:ignore
