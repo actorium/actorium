@@ -1,12 +1,12 @@
-import types
 from collections.abc import Callable, Coroutine
-from contextlib import AsyncExitStack
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Literal, get_args
 
 from anyio import fail_after
 from pydantic import BaseModel
 
 from ..actors import Actor, ActorRef, spawn
+from ._generic import generic_function
 from .future import future
 
 __all__ = [
@@ -55,21 +55,20 @@ class RpcRef[In, Out](ActorRef[CallRpc[In, Out]]):
         return CallRpc[in_type, out_type]  # type:ignore
 
     async def ask(self, value: In, timeout: float | None = None) -> Out:
-        if TYPE_CHECKING:
-            async with future[Out]() as (f, reply_to):
-                self.tell(CallRpc[In, Out](input=value, reply_to=reply_to))
-                with fail_after(timeout):
-                    return await f.result()
-        else:
-            in_type, out_type = self.__pydantic_generic_metadata__["args"]
+        if not TYPE_CHECKING:
+            In, Out = self.__pydantic_generic_metadata__["args"]
 
-            async with future[out_type]() as (f, reply_to):
-                self.tell(CallRpc[in_type, out_type](input=value, reply_to=reply_to))
-                with fail_after(timeout):
-                    return await f.result()
+        async with future[Out]() as (f, reply_to):
+            self.tell(CallRpc[In, Out](input=value, reply_to=reply_to))
+            with fail_after(timeout):
+                return await f.result()
 
 
-class rpc[In, Out]:
+@generic_function
+@asynccontextmanager
+async def rpc[In, Out](
+    func: Callable[[In], Coroutine[Any, Any, Out]],
+) -> AsyncGenerator[RpcRef[In, Out]]:
     """
     Register a new RPC actor.
 
@@ -81,29 +80,5 @@ class rpc[In, Out]:
         async with rpc[int, int](double_it) as double_actor:
             assert await double_actor.ask(2) == 4
     """
-
-    def __init__(self, func: Callable[[In], Coroutine[Any, Any, Out]]) -> None:
-        self.func = func
-
-    async def __aenter__(self) -> RpcRef[In, Out]:
-        self._stack = await AsyncExitStack().__aenter__()
-
-        if TYPE_CHECKING:
-            rpc_actor, ref = await self._stack.enter_async_context(
-                spawn(RpcActor[In, Out], self.func)
-            )
-            return ref.wrap(RpcRef[In, Out])
-        else:
-            in_type, out_type = get_args(self.__orig_class__)
-            rpc_actor, ref = await self._stack.enter_async_context(
-                spawn(RpcActor[in_type, out_type], self.func)
-            )
-            return ref.wrap(RpcRef[in_type, out_type])
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: types.TracebackType | None,
-    ) -> bool | None:
-        return await self._stack.__aexit__(exc_type, exc_value, traceback)
+    async with spawn(RpcActor[In, Out], func) as (actor, ref):
+        yield ref.wrap(RpcRef[In, Out])

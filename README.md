@@ -24,10 +24,10 @@ uv pip install actorium
 
 ```python
 #!/usr/bin/env python
-from anyio import run, sleep
+from anyio import run, sleep, Actor
 from actorium import actor_system, spawn
 
-class MyActor:
+class MyActor(Actor[str]):
     "Simple actor that prints whatever it receives."
 
     async def receive(msg: str) -> None:

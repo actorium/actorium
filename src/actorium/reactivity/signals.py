@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import types
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Literal, assert_never, get_args
@@ -8,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, assert_never, get_args
 from pydantic import BaseModel
 
 from ..actors import Actor, ActorRef, spawn
+from ._generic import generic_function
 from .future import future
 
 __all__ = [
@@ -80,16 +80,12 @@ class SignalReader[T](ActorRef[SignalReaderMsg[T]]):
     """
 
     async def get(self) -> T:
-        if TYPE_CHECKING:
-            async with future[T]() as (f, reply_to):
-                self.tell(Get[T](reply_to=reply_to))
-                return await f.result()
+        if not TYPE_CHECKING:
+            T = self.data_type()
 
-        else:
-            t = self.data_type()
-            async with future[t]() as (f, reply_to):
-                self.tell(Get[t](reply_to=reply_to))
-                return await f.result()
+        async with future[T]() as (f, reply_to):
+            self.tell(Get[T](reply_to=reply_to))
+            return await f.result()
 
     @classmethod
     def data_type(cls) -> type[T]:
@@ -105,60 +101,31 @@ class SignalReader[T](ActorRef[SignalReaderMsg[T]]):
         Subscribe to `ref` changes, tell the actor to send the updates to the
         given `reply_to` actor.
         """
-        if TYPE_CHECKING:
-            self.tell(Subscribe[T](actor=reply_to))
-        else:
-            self.tell(Subscribe[self.data_type()](actor=reply_to))
+        if not TYPE_CHECKING:
+            T = self.data_type()
+
+        self.tell(Subscribe[T](actor=reply_to))
         try:
             yield
         finally:
-            if TYPE_CHECKING:
-                self.tell(Unsubscribe[T](actor=reply_to))
-            else:
-                self.tell(Unsubscribe[self.data_type()](actor=reply_to))
+            self.tell(Unsubscribe[T](actor=reply_to))
 
 
 type SignalSetter[T] = Callable[[T], Coroutine[Any, Any, None]]
 
 
-from contextlib import AsyncExitStack
-
-
-class signal[T]:
+@generic_function
+@asynccontextmanager
+async def signal[T](initial: T) -> tuple[SignalReader[T], SignalSetter[T]]:
     """
     Create a reactive signal. This produces an actor for observing the signal
-    and retrieving its value, and a setter for storing a new value.
+    and retrieving its value and a setter for storing a new value.
 
     Usage::
 
-        async with signal(int, initial=0) as (count, set_count):
+        async with signal[int](initial=0) as (count, set_count):
             await set_count(...)
             value = count.get()
     """
-
-    def __init__(self, initial: T) -> None:
-        self.initial = initial
-
-    async def __aenter__(self) -> tuple[SignalReader[T], SignalSetter[T]]:
-        self._stack = await AsyncExitStack().__aenter__()
-
-        if TYPE_CHECKING:
-            signal, ref = await self._stack.enter_async_context(
-                spawn(_Signal[T], self.initial)
-            )
-            return ref.wrap(SignalReader[T]), signal.set
-        else:
-            type_ = get_args(self.__orig_class__)[0]
-
-            signal, ref = await self._stack.enter_async_context(
-                spawn(_Signal[type_], self.initial)
-            )
-            return ref.wrap(SignalReader[type_]), signal.set
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: types.TracebackType | None,
-    ) -> bool | None:
-        return await self._stack.__aexit__(exc_type, exc_value, traceback)
+    async with spawn(_Signal[T], initial) as (signal, ref):
+        yield ref.wrap(SignalReader[T]), signal.set
