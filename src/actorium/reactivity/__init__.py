@@ -1,6 +1,6 @@
 from .computed import computed
 from .rpc import CallRpc, RpcActor, rpc
-from .signals import Get, SignalReader, SignalReaderMsg, Subscribe, Unsubscribe, signal
+from .signals import Get, SignalMsg, SignalRef, Subscribe, Unsubscribe, signal
 
 __all__ = [
     # RPC.
@@ -11,8 +11,8 @@ __all__ = [
     "Subscribe",
     "Unsubscribe",
     "Get",
-    "SignalReaderMsg",
-    "SignalReader",
+    "SignalMsg",
+    "SignalRef",
     "signal",
     # Computed.
     "computed",

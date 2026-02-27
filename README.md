@@ -36,9 +36,8 @@ class MyActor(Actor[str]):
 async def example() -> None:
     async with actor_system():
         # Spawn actor and obtain a reference to it.
-        async with spawn(MyActor) as (my_actor, actor_ref):
+        async with spawn(MyActor) as actor_ref:
             # Thanks to type inference, Mypy knows that:
-            # - `my_actor` is of type `MyActor`.
             # - `actor_ref` is of type `ActorRef[str]`.
             # Further, messages are automatically serialized/deserialized using
             # a Pydantic `TypeAdapter[str]`.

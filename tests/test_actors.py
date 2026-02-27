@@ -14,31 +14,30 @@ from actorium import (
     register,
     spawn,
 )
-from actorium.reactivity import SignalReader, computed, rpc, signal
+from actorium.reactivity import SignalRef, computed, rpc, signal
 from actorium.reactivity.rpc import RpcRef
 from actorium.transports import TcpListener
 
 
 async def test_actors() -> None:
-    class Collector(Actor[int]):
-        def __init__(self) -> None:
-            self.items: list[int] = []
+    items: list[int] = []
 
+    class Collector(Actor[int]):
         async def receive(self, msg: int) -> None:
-            self.items.append(msg)
+            items.append(msg)
 
     async with actor_system():
-        async with spawn(Collector) as (collector, ref):
+        async with spawn(Collector) as ref:
             ref.tell(1)
             ref.tell(2)
             ref.tell(3)
 
-            await _assert_soon_equal(lambda: collector.items, [1, 2, 3])
+            await _assert_soon_equal(lambda: items, [1, 2, 3])
 
 
 async def test_actor_registry() -> None:
     ready = threading.Event()
-    received_items = []
+    received_items: list[int] = []
     thread1_addresses = []
 
     async def thread_1() -> None:
@@ -48,19 +47,18 @@ async def test_actor_registry() -> None:
             thread1_addresses = system.addresses()
 
             class Receiver(Actor[int]):
-                def __init__(self) -> None:
-                    self.items: list[int] = []
+                def __init__(self, items: list[int]) -> None:
+                    self.items = items
 
                 async def receive(self, msg: int) -> None:
                     self.items.append(msg)
 
             async with (
-                spawn(Receiver) as (receiver, ref),
+                spawn(Receiver, received_items) as ref,
                 register(ref, "our-actor"),
             ):
                 ready.set()
-                await _assert_soon_equal(lambda: receiver.items, [1, 2, 3])
-                received_items = receiver.items
+                await _assert_soon_equal(lambda: received_items, [1, 2, 3])
                 return
 
     async def thread_2() -> None:
@@ -90,47 +88,45 @@ class EchoMsg(BaseModel):
 
 async def test_send_actor_to_actor() -> None:
     async with actor_system():
+        items: list[int] = []
 
         class EchoActor(Actor[EchoMsg]):
             async def receive(self, msg: EchoMsg) -> None:
                 msg.reply_to.tell(msg.value)
 
         class Receiver(Actor[int]):
-            def __init__(self) -> None:
-                self.items: list[int] = []
-
             async def receive(self, msg: int) -> None:
-                self.items.append(msg)
+                items.append(msg)
 
         async with (
-            spawn(EchoActor) as (_, echo_ref),
-            spawn(Receiver) as (receiver, receiver_ref),
+            spawn(EchoActor) as echo_ref,
+            spawn(Receiver) as receiver_ref,
         ):
             echo_ref.tell(EchoMsg(value=1, reply_to=receiver_ref))
             echo_ref.tell(EchoMsg(value=2, reply_to=receiver_ref))
             echo_ref.tell(EchoMsg(value=3, reply_to=receiver_ref))
 
-            await _assert_soon_equal(lambda: receiver.items, [1, 2, 3])
+            await _assert_soon_equal(lambda: items, [1, 2, 3])
 
 
 async def test_ref() -> None:
     async with actor_system():
-        async with signal[int](10) as (number, set_number):
+        async with signal[int](10) as number:
             assert await number.get() == 10
-            await set_number(20)
+            number.set(20)
             assert await number.get() == 20
 
 
 async def test_ref_with_registration() -> None:
     async with actor_system():
         async with (
-            signal[int](10) as (number, set_number),
+            signal[int](10) as number,
             register(number, "our-actor"),
         ):
             assert await number.get() == 10
-            await set_number(20)
+            number.set(20)
 
-            number2 = await name_resolver().resolve("our-actor", SignalReader[int])
+            number2 = await name_resolver().resolve("our-actor", SignalRef[int])
             assert number2 is not None
             assert await number2.get() == 20
 
@@ -170,8 +166,8 @@ async def test_computed() -> None:
     async with actor_system():
         # Create two reactive objects, number1 and number2
         async with (
-            signal[int](0) as (number1, set_number1),
-            signal[int](0) as (number2, set_number2),
+            signal[int](0) as number1,
+            signal[int](0) as number2,
         ):
             # The computation
             async def the_sum(value1: int, value2: int) -> int:
@@ -182,8 +178,8 @@ async def test_computed() -> None:
                 assert await ref3.get() == 0
 
                 # Change source objects.
-                await set_number1(10)
-                await set_number2(20)
+                number1.set(10)
+                number2.set(20)
 
                 # Changes should propagate.
                 await _assert_soon_equal(ref3.get, 30)
@@ -193,24 +189,18 @@ async def test_tcp_protocol() -> None:
     received_items = []
 
     class Collector(Actor[int]):
-        def __init__(self) -> None:
-            self.items: list[int] = []
-
         async def receive(self, msg: int) -> None:
-            self.items.append(msg)
+            received_items.append(msg)
 
     async def thread_1() -> None:
-        nonlocal received_items
-
         async with (
             TcpListener.create(host="localhost", port=9000) as tcp_listener,
             actor_system(listeners=[tcp_listener]),
-            spawn(Collector) as (collector, ref),
+            spawn(Collector) as ref,
             register(ref, "our-actor"),
         ):
             # Sleep until equal.
-            await _assert_soon_equal(lambda: collector.items, [1, 2, 3])
-            received_items = collector.items
+            await _assert_soon_equal(lambda: received_items, [1, 2, 3])
 
     async def thread_2() -> None:
         async with actor_system():
@@ -236,20 +226,6 @@ async def test_tcp_protocol() -> None:
         tg.start_soon(to_thread.run_sync, run, thread_2)
 
     assert received_items == [1, 2, 3]
-
-
-"""
-def _double_it(value: int) -> int:
-    return value * 2
-
-
-async def test_subprocess_spawning() -> None:
-    async with ActorSpawnerActorRef.create_in_subprocess() as spawner:
-        async with spawner.spawn_new(RpcActor(_double_it)) as doubler_ref:
-            double_ref = doubler_ref.wrap(RpcActor[int, int])
-            result = await double_ref.ask(10)
-            assert result == 20
-"""
 
 
 async def _assert_soon_equal[T](

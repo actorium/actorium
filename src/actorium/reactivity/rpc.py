@@ -61,7 +61,7 @@ class RpcRef[In, Out](ActorRef[CallRpc[In, Out]]):
         async with future[Out]() as (f, reply_to):
             self.tell(CallRpc[In, Out](input=value, reply_to=reply_to))
             with fail_after(timeout):
-                return await f.result()
+                return await f
 
 
 @generic_function
@@ -80,5 +80,5 @@ async def rpc[In, Out](
         async with rpc[int, int](double_it) as double_actor:
             assert await double_actor.ask(2) == 4
     """
-    async with spawn(RpcActor[In, Out], func) as (actor, ref):
+    async with spawn(RpcActor[In, Out], func) as ref:
         yield ref.wrap(RpcRef[In, Out])

@@ -12,8 +12,8 @@ __all__ = [
 
 
 class Future[T](Actor[T]):
-    def __init__(self) -> None:
-        self._future = asyncio.Future[T]()
+    def __init__(self, fut: asyncio.Future[T]) -> None:
+        self._future = fut
 
     def message_type(self) -> type[T]:
         return get_args(self.__orig_class__)[0]  # type:ignore
@@ -27,9 +27,10 @@ class Future[T](Actor[T]):
 
 @generic_function
 @asynccontextmanager
-async def future[T]() -> AsyncGenerator[tuple[Future[T], ActorRef[T]]]:
+async def future[T]() -> AsyncGenerator[tuple[asyncio.Future[T], ActorRef[T]]]:
     """
     Factory for spawning a future.
     """
-    async with spawn(Future[T]) as (fut, ref):
+    fut = asyncio.Future[T]()
+    async with spawn(Future[T], fut) as ref:
         yield fut, ref

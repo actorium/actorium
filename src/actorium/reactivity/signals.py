@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, Literal, assert_never, get_args
+from typing import TYPE_CHECKING, Literal, assert_never, get_args
 
 from pydantic import BaseModel
 
@@ -15,9 +15,9 @@ __all__ = [
     "Subscribe",
     "Unsubscribe",
     "Get",
-    "SignalReaderMsg",
+    "SignalMsg",
     # ActorRef.
-    "SignalReader",
+    "SignalRef",
     "signal",
 ]
 
@@ -37,11 +37,16 @@ class Get[T](BaseModel):
     reply_to: ActorRef[T]
 
 
-type SignalReaderMsg[T] = Subscribe[T] | Unsubscribe[T] | Get[T]
-type SignalReaderMsgType[T] = type[Subscribe[T] | Unsubscribe[T] | Get[T]]
+class Set[T](BaseModel):
+    type: Literal["get"] = "get"
+    value: T
 
 
-class _Signal[T](Actor[SignalReaderMsg[T]]):
+type SignalMsg[T] = Subscribe[T] | Unsubscribe[T] | Get[T] | Set[T]
+type SignalMsgType[T] = type[Subscribe[T] | Unsubscribe[T] | Get[T]]
+
+
+class _Signal[T](Actor[SignalMsg[T]]):
     def __init__(self, initial: T) -> None:
         self.value = initial
         self.subscriptions: set[ActorRef[T]] = set()
@@ -49,10 +54,10 @@ class _Signal[T](Actor[SignalReaderMsg[T]]):
     def data_type(self) -> type[T]:
         return get_args(self.__orig_class__)[0]  # type:ignore
 
-    def message_type(self) -> SignalReaderMsgType[T]:
-        return SignalReaderMsg[self.data_type()]  # type:ignore
+    def message_type(self) -> SignalMsgType[T]:
+        return SignalMsg[self.data_type()]  # type:ignore
 
-    async def set(self, value: T) -> None:
+    def _set(self, value: T) -> None:
         if self.value == value:
             return
 
@@ -61,10 +66,12 @@ class _Signal[T](Actor[SignalReaderMsg[T]]):
         for subscription in self.subscriptions:
             subscription.tell(value)
 
-    async def receive(self, msg: SignalReaderMsg[T]) -> None:
+    async def receive(self, msg: SignalMsg[T]) -> None:
         match msg:
             case Get(reply_to=reply_to):
                 reply_to.tell(self.value)
+            case Set(value=value):
+                self._set(value)
             case Subscribe(actor=actor):
                 self.subscriptions.add(actor)
             case Unsubscribe(actor=actor):
@@ -73,10 +80,10 @@ class _Signal[T](Actor[SignalReaderMsg[T]]):
                 assert_never(x)
 
 
-class SignalReader[T](ActorRef[SignalReaderMsg[T]]):
+class SignalRef[T](ActorRef[SignalMsg[T]]):
     """
-    Reference to a `signal` actor with helper methods for getting the state or
-    subscribing to state changes.
+    Reference to a `signal` actor with helper methods for getting, setting or
+    subscribing to the state.
     """
 
     async def get(self) -> T:
@@ -85,15 +92,21 @@ class SignalReader[T](ActorRef[SignalReaderMsg[T]]):
 
         async with future[T]() as (f, reply_to):
             self.tell(Get[T](reply_to=reply_to))
-            return await f.result()
+            return await f
+
+    def set(self, value: T) -> None:
+        if not TYPE_CHECKING:
+            T = self.data_type()
+
+        self.tell(Set[T](value=value))
 
     @classmethod
     def data_type(cls) -> type[T]:
         return cls.__pydantic_generic_metadata__["args"][0]  # type:ignore
 
     @classmethod
-    def message_type(cls) -> SignalReaderMsgType[T]:
-        return SignalReaderMsg[cls.data_type()]  # type:ignore
+    def message_type(cls) -> SignalMsgType[T]:
+        return SignalMsg[cls.data_type()]  # type:ignore
 
     @asynccontextmanager
     async def subscribe(self, reply_to: ActorRef[T]) -> AsyncGenerator[None]:
@@ -111,21 +124,18 @@ class SignalReader[T](ActorRef[SignalReaderMsg[T]]):
             self.tell(Unsubscribe[T](actor=reply_to))
 
 
-type SignalSetter[T] = Callable[[T], Coroutine[Any, Any, None]]
-
-
 @generic_function
 @asynccontextmanager
-async def signal[T](initial: T) -> tuple[SignalReader[T], SignalSetter[T]]:
+async def signal[T](initial: T) -> AsyncGenerator[SignalRef[T]]:
     """
     Create a reactive signal. This produces an actor for observing the signal
     and retrieving its value and a setter for storing a new value.
 
     Usage::
 
-        async with signal[int](initial=0) as (count, set_count):
-            await set_count(...)
-            value = count.get()
+        async with signal[int](initial=0) as count:
+            count.set(...)
+            value = await count.get()
     """
-    async with spawn(_Signal[T], initial) as (signal, ref):
-        yield ref.wrap(SignalReader[T]), signal.set
+    async with spawn(_Signal[T], initial) as ref:
+        yield ref.wrap(SignalRef[T])

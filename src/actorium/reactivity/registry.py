@@ -66,7 +66,7 @@ class RegistryRef(ActorRef[RegistryMessage]):
         async with future[LookupResultMessage]() as (f, reply_to):
             self.tell(Lookup(name=name, reply_to=reply_to))
             with fail_after(timeout):
-                return await f.result()
+                return await f
 
 
 class NameResolver:

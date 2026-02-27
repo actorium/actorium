@@ -13,7 +13,7 @@ class MyActor(Actor[str]):
 async def example() -> None:
     async with actor_system():
         # Spawn actor and obtain a reference to it.
-        async with spawn(MyActor) as (_, actor_ref):
+        async with spawn(MyActor) as actor_ref:
             # Send messages to this actor through the reference.
             actor_ref.tell("Hello")
             actor_ref.tell("World")

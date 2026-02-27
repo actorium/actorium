@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from ..actors import Actor, spawn
-from .signals import SignalReader, signal
+from .signals import SignalRef, signal
 
 __all__ = [
     "computed",
@@ -15,11 +15,11 @@ async def computed[T, U, V](
     type_: type[T],
     /,
     func: Callable[[T, U], Coroutine[Any, Any, V]],
-    reactive1: SignalReader[T],
-    reactive2: SignalReader[U],
-) -> AsyncGenerator[SignalReader[V]]:
+    reactive1: SignalRef[T],
+    reactive2: SignalRef[U],
+) -> AsyncGenerator[SignalRef[V]]:
     """
-    Produces a reactive `SignalReader` actor for which it's value is computed
+    Produces a reactive `SignalRef` actor for which it's value is computed
     using `func`, observing `reactive1` and `reactive2`. Sometimes also called
     a 'memo'.
 
@@ -42,7 +42,7 @@ async def computed[T, U, V](
 
     initial = await func(value1, value2)
 
-    async with signal[type_](initial) as (result, set_result):
+    async with signal[type_](initial) as result:
 
         class Update1(Actor[T]):
             async def receive(self, msg: T) -> None:
@@ -50,7 +50,7 @@ async def computed[T, U, V](
                 value1 = msg
 
                 new_value = await func(value1, value2)
-                await set_result(new_value)
+                result.set(new_value)
 
             def message_type(self) -> type[T]:
                 return reactive1.data_type()
@@ -61,15 +61,15 @@ async def computed[T, U, V](
                 value2 = msg
 
                 new_value = await func(value1, value2)
-                await set_result(new_value)
+                result.set(new_value)
 
             def message_type(self) -> type[U]:
                 return reactive2.data_type()
 
         async with (
             # Spawn two actors for receiving corresponding updates.
-            spawn(Update1) as (_, update1_actor),
-            spawn(Update2) as (_, update2_actor),
+            spawn(Update1) as update1_actor,
+            spawn(Update2) as update2_actor,
             # Subscribe to updates coming from both reactive objects.
             reactive1.subscribe(update1_actor),
             reactive2.subscribe(update2_actor),

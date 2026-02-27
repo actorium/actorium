@@ -60,7 +60,7 @@ class ActorFactory[A, T, **P](Protocol):
 @asynccontextmanager
 async def spawn[A, T, **P](
     factory: ActorFactory[A, T, P], /, *args: P.args, **kwargs: P.kwargs
-) -> AsyncGenerator[tuple[A, ActorRef[T]]]:
+) -> AsyncGenerator[ActorRef[T]]:
     """
     Context manager for spawning a new actor.
 
@@ -75,7 +75,7 @@ async def spawn[A, T, **P](
             def __init__(self, param: str)-> None: ...
             async def receive(self, msg: int) -> None: ...
 
-        async with spawn(Collector, param="some-param") as (actor, ref): ...
+        async with spawn(Collector, param="some-param") as ref: ...
     """
     system = current_actor_system()
     actor = factory(*args, **kwargs)
@@ -112,7 +112,7 @@ async def spawn[A, T, **P](
         else:
             ref = ActorRef[message_type](addresses=addresses, actor_id=actor_id)
 
-        yield actor, ref
+        yield ref
 
         tg.cancel_scope.cancel()
 
@@ -126,9 +126,8 @@ async def __test_type_inference() -> None:
     class Collector(Actor[int]):
         async def receive(self, msg: int) -> None: ...
 
-    async with spawn(Collector) as (a, b):
-        assert_type(a, Collector)
-        assert_type(b, ActorRef[int])
+    async with spawn(Collector) as ref:
+        assert_type(ref, ActorRef[int])
 
     class CollectorWithArgs(Actor[int]):
         def __init__(self, a: int, b: str) -> None: ...

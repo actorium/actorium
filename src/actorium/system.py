@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import asynccontextmanager, suppress
-from typing import TYPE_CHECKING, AsyncGenerator, Callable, Never, Self, Sequence
+from typing import TYPE_CHECKING, AsyncGenerator, Callable, Self, Sequence
 
 from anyio import BrokenResourceError, create_task_group
 from anyio.abc import TaskGroup
