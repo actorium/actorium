@@ -1,127 +1,172 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Callable, Self, Sequence
+from ipaddress import IPv4Address
+from logging import getLogger
+from typing import assert_never
 
 from anyio import (
-    Lock,
+    BrokenResourceError,
     connect_tcp,
     create_task_group,
     create_tcp_listener,
     move_on_after,
+    sleep,
+    sleep_forever,
 )
-from anyio.abc import SocketStream, TaskGroup
+from anyio.abc import SocketStream
+from pydantic import TypeAdapter
 
-from ..addresses import ActorId, Address, Host, TcpAddress
-from ._line_protocol import LineReceiver, MessageForActor
-from .base import Listener, Outbox, SendResult
+from ..actors.future import future
+from ..core import Actor, Mailbox, Ref
+from ..core.system import (
+    MessageForActor,
+    PublishMessage,
+    PublishRoute,
+    Register,
+    RegisterRoute,
+    Unregister,
+    get_system,
+    spawn,
+)
+from ._line_protocol import LineReceiver
 
 __all__ = [
-    "TcpOutbox",
-    "TcpListener",
+    "TcpServer",
+    "TcpClient",
 ]
 
+type Host = IPv4Address | str
+type RouterMessage = MessageForActor | PublishRoute | Register | Unregister
 
-class TcpOutbox(Outbox):
-    def __init__(self, tg: TaskGroup) -> None:
-        self.tg = tg
-        self._address_to_outbox: dict[tuple[Address, ActorId], TcpActorOutbox] = {}
+_adapter: TypeAdapter[RouterMessage] = TypeAdapter(RouterMessage)
 
-    @classmethod
-    @asynccontextmanager
-    async def create(cls) -> AsyncGenerator[Self]:
-        async with create_task_group() as tg:
-            instance = cls(tg=tg)
-            try:
-                yield instance
-            finally:
-                for actor_outbox in instance._address_to_outbox.values():
-                    await actor_outbox.aclose()
-
-    async def send_to_actor(
-        self, addresses: Sequence[Address], actor_id: ActorId, serialized_message: str
-    ) -> SendResult:
-        for address in addresses:
-            if not isinstance(address, TcpAddress):
-                continue
-
-            try:
-                actor_outbox = self._address_to_outbox[address, actor_id]
-            except KeyError:
-                socketstream = await connect_tcp(address.host, address.port)
-                actor_outbox = TcpActorOutbox(socketstream, actor_id)
-                self._address_to_outbox[address, actor_id] = actor_outbox
-                await actor_outbox.send(serialized_message)
-                return SendResult.MESSAGE_SENT
-
-            # TODO: figure out if the actor with the given ID does exist on
-            #       this node and return `ActorNotFound` if so.
-
-        return SendResult.NO_ADDRESS_HANDLED_HERE
+_logger = getLogger(__name__)
 
 
-class TcpActorOutbox:
-    def __init__(self, socketstream: SocketStream, actor_id: ActorId) -> None:
-        self._socketstream = socketstream
-        self._actor_id = actor_id
-        self._lock = Lock()
+class TcpServer(Actor[None]):
+    """
+    Actor that listens on the given host/port and accept connection from
+    another actor system through a `TcpClient`.
+    """
 
-    async def send(self, message: str) -> None:
-        message_for_actor = MessageForActor(actor_id=self._actor_id, message=message)
-
-        async with self._lock:
-            await self._socketstream.send(
-                message_for_actor.model_dump_json().encode() + b"\n"
-            )
-
-    async def aclose(self) -> None:
-        async with self._lock:
-            await self._socketstream.aclose()
-
-
-class TcpListener(Listener):
     def __init__(self, host: Host, port: int) -> None:
         self.host = host
         self.port = port
-        self._callback: Callable[[ActorId, str], None] | None = None
 
-    def addresses(self) -> list[Address]:
-        return [TcpAddress(host=self.host, port=self.port)]
-
-    @classmethod
-    @asynccontextmanager
-    async def create(cls, host: Host, port: int) -> AsyncGenerator[Self]:
-        listener = await create_tcp_listener(local_host=host, local_port=port)
+    async def run(self, mailbox: Mailbox[None]) -> None:
+        backoff = 0.5
+        while True:
+            try:
+                listener = await create_tcp_listener(
+                    local_host=self.host, local_port=self.port
+                )
+            except OSError:
+                _logger.exception(
+                    "Failed to listen on port: %s. Trying again in %s seconds",
+                    self.port,
+                    backoff,
+                )
+                await sleep(backoff)
+                backoff = min(20, backoff * 2)
+            else:
+                break
 
         try:
-            instance = cls(host=host, port=port)
-
-            async with create_task_group() as tg:
-                tg.start_soon(listener.serve, instance._handle_tcp_connection)
-                yield instance
-
-                tg.cancel_scope.cancel()
+            await listener.serve(self._handle_connection)
         finally:
             with move_on_after(1.0, shield=True):
                 await listener.aclose()
 
-    async def _handle_tcp_connection(self, client: SocketStream) -> None:
-        line_receiver = LineReceiver(client)
+    async def _handle_connection(self, client: SocketStream) -> None:
+        async with spawn(_TcpConnection, client):
+            await sleep_forever()
+
+
+class TcpClient(Actor[None]):
+    def __init__(self, host: Host, port: int) -> None:
+        self.host = host
+        self.port = port
+
+    async def run(self, mailbox: Mailbox[None]) -> None:
+        backoff_seconds = 0.5
+        while True:
+            try:
+                client = await connect_tcp(self.host, self.port)
+            except OSError:
+                await sleep(backoff_seconds)
+                backoff_seconds *= 1.5
+            else:
+                backoff_seconds = 0.5
+                async with client:
+                    async with future[None]() as (done_future, ref):
+                        async with spawn(_TcpConnection, client, ref):
+                            await done_future
+
+
+class _TcpConnection(Actor[MessageForActor | PublishMessage]):
+    def __init__(
+        self, client: SocketStream, done_future: Ref[None] | None = None
+    ) -> None:
+        self._client = client
+        self._done_future = done_future
+
+    async def run(self, mailbox: Mailbox[MessageForActor | PublishMessage]) -> None:
+        system = get_system()
+
+        async with (
+            create_task_group() as tg,
+            system.subscribe_state(mailbox.ref()),
+        ):
+            tg.start_soon(self._read_tcp_stream, mailbox)
+
+            try:
+                async for msg in mailbox:
+                    await self._client.send(msg.model_dump_json().encode() + b"\n")
+            except BrokenResourceError:
+                # Other side went away. Cancel and leave.
+                tg.cancel_scope.cancel()
+                return
+
+    async def _read_tcp_stream(
+        self, mailbox: Mailbox[MessageForActor | PublishMessage]
+    ) -> None:
+        "Read incoming TCP messages."
+        line_receiver = LineReceiver(self._client)
+        system = get_system()
+
+        published_names: dict[str, Register] = {}
+
         async for line in line_receiver:
-            message = MessageForActor.model_validate_json(line)
-            callback = self._callback
-            if callback is None:
-                print("No callback set in TCP listener.")
-                continue
+            msg = _adapter.validate_json(line)
 
-            callback(message.actor_id, message.message)
+            match msg:
+                case MessageForActor():
+                    system.tell(msg)
+                case PublishRoute(system_id=system_id):
+                    system.tell(
+                        RegisterRoute(system_id=system_id, gateway=mailbox.ref())
+                    )
+                case Register(name=name):
+                    system.tell(msg)
+                    published_names[name] = msg
+                case Unregister(name=name, unregister_key=unregister_key):
+                    system.tell(Unregister(name=name, unregister_key=unregister_key))
+                    if (
+                        name in published_names
+                        and published_names[name].unregister_key == unregister_key
+                    ):
+                        del published_names[name]
+                case _:
+                    assert_never(msg)
 
-    @asynccontextmanager
-    async def listen(
-        self, callback: Callable[[ActorId, str], None]
-    ) -> AsyncGenerator[None]:
-        self._callback = callback
-        try:
-            yield
-        finally:
-            self._callback = None
+        # If the TCP connection drops, immediately tell the system to
+        # unregister all routes/names that were published through this actor.
+        for publish_name in published_names.values():
+            system.tell(
+                Unregister(
+                    name=publish_name.name, unregister_key=publish_name.unregister_key
+                )
+            )
+
+        if self._done_future is not None:
+            self._done_future.tell(None)

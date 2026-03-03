@@ -1,18 +1,20 @@
 #!/usr/bin/env python
-from anyio import run, sleep
 
-from actorium import Actor, actor_system, spawn
+from anyio import sleep
+
+from actorium import Actor, Mailbox, run, spawn
 
 
 class MyActor(Actor[str]):
-    async def receive(self, msg: str) -> None:
+    async def run(self, mailbox: Mailbox[str]) -> None:
         "Simple actor that prints whatever it receives."
-        print(f"Received {msg} in actor.")
+        while True:
+            msg = await mailbox.next()
+            print(f"Received {msg} in actor.")
 
 
-async def example() -> None:
-    async with actor_system():
-        # Spawn actor and obtain a reference to it.
+class Main(Actor[None]):
+    async def run(self, mailbox: Mailbox[None]) -> None:
         async with spawn(MyActor) as actor_ref:
             # Send messages to this actor through the reference.
             actor_ref.tell("Hello")
@@ -24,4 +26,4 @@ async def example() -> None:
 
 
 if __name__ == "__main__":
-    run(example)
+    run(Main)

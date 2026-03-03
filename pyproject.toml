@@ -21,6 +21,8 @@ dependencies = [
    "pydantic",
    "anyio",
    "redis>=5.0.0",
+   # Usage of typemap_extensions, see: https://github.com/msullivan/typemap-test/tree/main
+   "typemap @ git+https://github.com/vercel/python-typemap.git",
 ]
 
 [project.urls]
@@ -29,7 +31,8 @@ Homepage = "https://github.com/actorium/actorium"
 [dependency-groups]
 dev = [
     'pytest',
-    'mypy',
+    #'mypy',
+    "mypy @ git+https://github.com/msullivan/mypy-typemap.git",
 ]
 
 [tool.mypy]

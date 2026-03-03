@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Self
 
-from anyio import EndOfStream
+from anyio import BrokenResourceError, EndOfStream
 from anyio.abc import SocketStream
-from pydantic import BaseModel
 
-from ..addresses import ActorId
+__all__ = [
+    "LineReceiver",
+]
 
 
 @dataclass
@@ -32,7 +33,10 @@ class LineReceiver:
             if pos != -1:
                 break
 
-            chunk = await self.client.receive()
+            try:
+                chunk = await self.client.receive()
+            except BrokenResourceError:
+                raise EndOfStream()
 
             self._buffer.extend(chunk)
 
@@ -40,8 +44,3 @@ class LineReceiver:
         del self._buffer[: pos + 1]
 
         return line.decode("utf-8")
-
-
-class MessageForActor(BaseModel):
-    actor_id: ActorId
-    message: str  # json-serialized
