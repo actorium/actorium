@@ -2,7 +2,7 @@ from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
 
-from ..actors import Actor, spawn
+from ..core import Actor, Mailbox, spawn
 from .signals import SignalRef, signal
 
 __all__ = [
@@ -45,23 +45,23 @@ async def computed[T, U, V](
     async with signal[type_](initial) as result:
 
         class Update1(Actor[T]):
-            async def receive(self, msg: T) -> None:
+            async def run(self, mailbox: Mailbox[T]) -> None:
                 nonlocal value1
-                value1 = msg
 
-                new_value = await func(value1, value2)
-                result.set(new_value)
+                async for value1 in mailbox:
+                    new_value = await func(value1, value2)
+                    result.set(new_value)
 
             def message_type(self) -> type[T]:
                 return reactive1.data_type()
 
         class Update2(Actor[U]):
-            async def receive(self, msg: U) -> None:
+            async def run(self, mailbox: Mailbox[U]) -> None:
                 nonlocal value2
-                value2 = msg
 
-                new_value = await func(value1, value2)
-                result.set(new_value)
+                async for value2 in mailbox:
+                    new_value = await func(value1, value2)
+                    result.set(new_value)
 
             def message_type(self) -> type[U]:
                 return reactive2.data_type()

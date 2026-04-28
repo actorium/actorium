@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal, assert_never, get_args
 
 from pydantic import BaseModel
 
-from ..actors import Actor, ActorRef, spawn
+from ..core import Actor, ActorAddress, Mailbox, Ref, spawn
 from ._generic import generic_function
 from .future import future
 
@@ -16,7 +16,7 @@ __all__ = [
     "Unsubscribe",
     "Get",
     "SignalMsg",
-    # ActorRef.
+    # Ref.
     "SignalRef",
     "signal",
 ]
@@ -24,17 +24,17 @@ __all__ = [
 
 class Subscribe[T](BaseModel):
     type: Literal["subscribe"] = "subscribe"
-    actor: ActorRef[T]
+    actor: Ref[T]
 
 
 class Unsubscribe[T](BaseModel):
     type: Literal["unsubscribe"] = "unsubscribe"
-    actor: ActorRef[T]
+    actor: Ref[T]
 
 
 class Get[T](BaseModel):
     type: Literal["get"] = "get"
-    reply_to: ActorRef[T]
+    reply_to: Ref[T]
 
 
 class Set[T](BaseModel):
@@ -49,10 +49,15 @@ type SignalMsgType[T] = type[Subscribe[T] | Unsubscribe[T] | Get[T]]
 class _Signal[T](Actor[SignalMsg[T]]):
     def __init__(self, initial: T) -> None:
         self.value = initial
-        self.subscriptions: set[ActorRef[T]] = set()
+        self.subscriptions: set[Ref[T]] = set()
 
     def data_type(self) -> type[T]:
         return get_args(self.__orig_class__)[0]  # type:ignore
+
+    def actor_ref(self, actor_address: ActorAddress) -> SignalRef[T]:
+        if not TYPE_CHECKING:
+            T = self.data_type()
+        return SignalRef[T](actor_address=actor_address)
 
     def message_type(self) -> SignalMsgType[T]:
         return SignalMsg[self.data_type()]  # type:ignore
@@ -66,21 +71,22 @@ class _Signal[T](Actor[SignalMsg[T]]):
         for subscription in self.subscriptions:
             subscription.tell(value)
 
-    async def receive(self, msg: SignalMsg[T]) -> None:
-        match msg:
-            case Get(reply_to=reply_to):
-                reply_to.tell(self.value)
-            case Set(value=value):
-                self._set(value)
-            case Subscribe(actor=actor):
-                self.subscriptions.add(actor)
-            case Unsubscribe(actor=actor):
-                self.subscriptions.discard(actor)
-            case _ as x:
-                assert_never(x)
+    async def run(self, mailbox: Mailbox[SignalMsg[T]]) -> None:
+        async for msg in mailbox:
+            match msg:
+                case Get(reply_to=reply_to):
+                    reply_to.tell(self.value)
+                case Set(value=value):
+                    self._set(value)
+                case Subscribe(actor=actor):
+                    self.subscriptions.add(actor)
+                case Unsubscribe(actor=actor):
+                    self.subscriptions.discard(actor)
+                case _ as x:
+                    assert_never(x)
 
 
-class SignalRef[T](ActorRef[SignalMsg[T]]):
+class SignalRef[T](Ref[SignalMsg[T]]):
     """
     Reference to a `signal` actor with helper methods for getting, setting or
     subscribing to the state.
@@ -109,7 +115,7 @@ class SignalRef[T](ActorRef[SignalMsg[T]]):
         return SignalMsg[cls.data_type()]  # type:ignore
 
     @asynccontextmanager
-    async def subscribe(self, reply_to: ActorRef[T]) -> AsyncGenerator[None]:
+    async def subscribe(self, reply_to: Ref[T]) -> AsyncGenerator[None]:
         """
         Subscribe to `ref` changes, tell the actor to send the updates to the
         given `reply_to` actor.
@@ -138,4 +144,4 @@ async def signal[T](initial: T) -> AsyncGenerator[SignalRef[T]]:
             value = await count.get()
     """
     async with spawn(_Signal[T], initial) as ref:
-        yield ref.wrap(SignalRef[T])
+        yield ref

@@ -1,24 +1,29 @@
 #!/usr/bin/env python
-from anyio import run
 
-from actorium import TcpAddress, actor_system, name_resolver
-from actorium.reactivity.rpc import RpcRef
-from actorium.transports import TcpListener
+from anyio import sleep
+
+from actorium import Actor, Mailbox, Timeout, get_system, run, spawn
+from actorium.actors import RpcRef
+from actorium.transports import TcpClient
 
 
-async def example() -> None:
-    async with (
-        TcpListener.create(host="localhost", port=9001) as tcp_listener,
-        actor_system(listeners=[tcp_listener]),
-    ):
-        resolver = name_resolver(
-            peer_addresses=[TcpAddress(host="localhost", port=9000)],
-        )
-        double_ref = await resolver.resolve("double", RpcRef[int, int])
+class Main(Actor[None]):
+    async def run(self, mailbox: Mailbox[None]) -> None:
+        system = get_system()
 
-        result = await double_ref.ask(10)
-        print("got result", result)
+        async with spawn(TcpClient, "localhost", 9000):
+            for i in range(100):
+                double_ref = await system.lookup("double", RpcRef[int, int], timeout=1)
+                if isinstance(double_ref, Timeout):
+                    print("Timeout while trying to resolve RPC endpoint.")
+                else:
+                    result = await double_ref.ask(10, timeout=1)
+                    if isinstance(result, Timeout):
+                        print("Timeout while calling RPC endpoint.")
+                    else:
+                        print("got result", result)
+                await sleep(0.3)
 
 
 if __name__ == "__main__":
-    run(example)
+    run(Main)

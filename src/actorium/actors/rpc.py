@@ -1,11 +1,13 @@
+from __future__ import annotations
+
 from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Literal, get_args
 
-from anyio import fail_after
+from anyio import create_task_group, fail_after
 from pydantic import BaseModel
 
-from ..actors import Actor, ActorRef, spawn
+from ..core import Actor, ActorAddress, Mailbox, Ref, Timeout, spawn
 from ._generic import generic_function
 from .future import future
 
@@ -25,7 +27,7 @@ class CallRpc[In, Out](BaseModel):
     input: In
 
     # Actor where the output should be send to.
-    reply_to: ActorRef[Out]
+    reply_to: Ref[Out]
 
 
 class RpcActor[In, Out](Actor[CallRpc[In, Out]]):
@@ -33,18 +35,28 @@ class RpcActor[In, Out](Actor[CallRpc[In, Out]]):
         self.func = func
 
     def message_type(self) -> type[CallRpc[In, Out]]:
-        in_type, out_type = get_args(self.__orig_class__)  # type:ignore
-        return CallRpc[in_type, out_type]  # type:ignore
+        if not TYPE_CHECKING:
+            In, Out = get_args(self.__orig_class__)
+        return CallRpc[In, Out]
 
-    async def receive(self, msg: CallRpc[In, Out]) -> None:
-        # TODO: Our introspection is not able to pick up the `msg` type here
-        #       due to the generics...
+    def actor_ref(self, actor_address: ActorAddress) -> RpcRef[In, Out]:
+        if not TYPE_CHECKING:
+            In, Out = get_args(self.__orig_class__)
+        return RpcRef[In, Out](actor_address=actor_address)
 
+    async def run(self, mailbox: Mailbox[CallRpc[In, Out]]) -> None:
+        async with create_task_group() as tg:
+            async for msg in mailbox:
+                tg.start_soon(self._handle_rpc_call, msg)
+                # TODO: Our introspection is not able to pick up the `msg` type here
+                #       due to the generics...
+
+    async def _handle_rpc_call(self, msg: CallRpc[In, Out]) -> None:
         result = await self.func(msg.input)
         msg.reply_to.tell(result)
 
 
-class RpcRef[In, Out](ActorRef[CallRpc[In, Out]]):
+class RpcRef[In, Out](Ref[CallRpc[In, Out]]):
     """
     Reference to an RPC actor with helper methods for Calling remote functions.
     """
@@ -54,14 +66,17 @@ class RpcRef[In, Out](ActorRef[CallRpc[In, Out]]):
         in_type, out_type = cls.__pydantic_generic_metadata__["args"]
         return CallRpc[in_type, out_type]  # type:ignore
 
-    async def ask(self, value: In, timeout: float | None = None) -> Out:
+    async def ask(self, value: In, timeout: float | None = None) -> Out | Timeout:
         if not TYPE_CHECKING:
             In, Out = self.__pydantic_generic_metadata__["args"]
 
         async with future[Out]() as (f, reply_to):
             self.tell(CallRpc[In, Out](input=value, reply_to=reply_to))
-            with fail_after(timeout):
-                return await f
+            try:
+                with fail_after(timeout):
+                    return await f
+            except TimeoutError:
+                return Timeout()
 
 
 @generic_function
@@ -81,4 +96,4 @@ async def rpc[In, Out](
             assert await double_actor.ask(2) == 4
     """
     async with spawn(RpcActor[In, Out], func) as ref:
-        yield ref.wrap(RpcRef[In, Out])
+        yield ref
