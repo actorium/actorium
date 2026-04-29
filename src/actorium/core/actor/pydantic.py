@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Literal, Self, get_args
+from typing import TYPE_CHECKING, Any, Literal, Self, get_args
 
 from pydantic import BaseModel, TypeAdapter
 from typing_extensions import TypeForm
 
 from ..types import ActorAddress
-from .base import AnyRef, BaseActor, RawMailbox
+from .base import BaseActor, RawMailbox
 
 __all__ = [
     "Actor",
@@ -57,7 +57,7 @@ class Mailbox[T]:
     """
 
     def __init__(
-        self, message_type: TypeForm[T], raw_mailbox: RawMailbox, ref: AnyRef
+        self, message_type: TypeForm[T], raw_mailbox: RawMailbox, ref: Ref[T]
     ) -> None:
         self._message_type = message_type
         self._raw_mailbox = raw_mailbox
@@ -65,7 +65,7 @@ class Mailbox[T]:
 
         self._type_adapter: TypeAdapter[T] = TypeAdapter(message_type)
 
-    def ref(self) -> AnyRef:
+    def ref(self) -> Ref[T]:
         return self._ref
 
     async def next(self) -> T:
@@ -100,7 +100,9 @@ class Ref[T](BaseModel):
         TypeAdapter(self.message_type())
 
     @classmethod
-    def message_type(cls) -> type[T]:
+    def message_type(cls) -> type[Any]:
+        # NOTE: The return type is actually `type[T]`, but it doesn't matter in
+        #       this context. We want `Ref[T]` to be covariant.
         try:
             return cls.__pydantic_generic_metadata__["args"][0]  # type:ignore
         except IndexError:

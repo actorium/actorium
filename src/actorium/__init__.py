@@ -3,6 +3,7 @@ from __future__ import annotations
 from .core import (
     Actor,
     BehaviorActor,
+    BehaviorRef,
     Mailbox,
     Ref,
     Timeout,
@@ -18,7 +19,8 @@ __all__ = [
     "Ref",
     "Mailbox",
     "BehaviorActor",
-    "behavior"
+    "BehaviorRef",
+    "behavior",
     # system.
     "run",
     "get_system",
