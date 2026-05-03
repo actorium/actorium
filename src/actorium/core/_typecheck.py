@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import assert_type
 
-from ..types import ActorAddress
 from .actor import Actor, BehaviorActor, Mailbox, Ref, behavior
 from .system import spawn
+from .types import ActorAddress, Timeout
 
 __all__ = []
 
@@ -54,7 +54,7 @@ async def __test_behavior_actor_type_inference() -> None:
         async def run(self, mailbox: Mailbox[None]) -> None:
             async with spawn(Calc) as ref:
                 result = await ref.be.double_it(4)
-                assert_type(result, int)
+                assert_type(result, int | Timeout)
 
                 result = await ref.be.is_even(4)
-                assert_type(result, bool)
+                assert_type(result, bool | Timeout)

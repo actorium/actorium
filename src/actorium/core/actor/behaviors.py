@@ -13,6 +13,7 @@ from typing import (
     cast,
 )
 
+from anyio import fail_after
 from pydantic import BaseModel, TypeAdapter
 from typemap_extensions import (
     Attrs,
@@ -23,7 +24,7 @@ from typemap_extensions import (
     NewProtocol,
 )
 
-from ..types import ActorAddress
+from ..types import ActorAddress, Timeout
 from .base import BaseActor, RawMailbox
 from .pydantic import Ref
 
@@ -34,33 +35,35 @@ __all__ = [
 ]
 
 
-class _BehaviorMethod[A: BehaviorActor, I, O]:
-    def __init__(self, func: Callable[[A, I], Coroutine[Any, Any, O]]) -> None:
+class _BehaviorMethod[A: BehaviorActor, *I, O]:
+    def __init__(self, func: Callable[[A, *I], Coroutine[Any, Any, O]]) -> None:
         self._func = func
 
-        input_param_name = list(inspect.signature(func).parameters)[1]
+        input_param_names = list(inspect.signature(func).parameters)[1:]
 
-        input_type = func.__annotations__[input_param_name]
+        input_type = tuple[*(func.__annotations__[name] for name in input_param_names)]  # type: ignore
         output_type = func.__annotations__["return"]
 
-        self.input_adapter = TypeAdapter[I](input_type)
+        self.input_adapter = TypeAdapter[tuple[*I]](input_type)
         self.output_adapter = TypeAdapter[O](output_type)
 
-    async def call(self, behavior_actor: A, param: I) -> O:
-        return await self._func(behavior_actor, param)
+    async def call(self, behavior_actor: A, *param: *I) -> O:
+        return await self._func(behavior_actor, *param)
 
     if TYPE_CHECKING:
         # Define a `behavior_method` for inclusion in the `BehaviorRefMethods`
         # `NewProtocol`.
 
         @staticmethod
-        async def behavior_method(param: I, /) -> O:
+        async def behavior_method(
+            *param: *I, timeout: float | None = None
+        ) -> O | Timeout:
             raise NotImplementedError
 
 
-def behavior[A: BehaviorActor, I, O](
-    method: Callable[[A, I], Coroutine[Any, Any, O]],
-) -> _BehaviorMethod[A, I, O]:
+def behavior[A: BehaviorActor, *I, O](
+    method: Callable[[A, *I], Coroutine[Any, Any, O]],
+) -> _BehaviorMethod[A, *I, O]:
     """
     Decorator for annotating methods of a `BehaviorActor`, exposing them
     publicly as an RPC method of the actor.
@@ -134,7 +137,7 @@ class BehaviorActor(BaseActor):
                 input_data = method.input_adapter.validate_json(
                     behavior_message.serialized_input
                 )
-                output_data = await method.call(self, input_data)
+                output_data = await method.call(self, *input_data)
 
                 # Return result.
                 behavior_message.reply_to.tell(
@@ -174,9 +177,14 @@ class BehaviorRef[A: BehaviorActor](BaseModel):
 
 type BehaviorRefMethods[A: BehaviorActor] = NewProtocol[
     *[
+        # Take the `behavior_method` from the `_BehaviorMethod` attributes from
+        # a `BehaviorActor`.
         Member[p.name, GetMemberType[p.type, Literal["behavior_method"]]]
         for p in Iter[Attrs[A]]
         if IsAssignable[p.type, _BehaviorMethod[Any, Any, Any]]
+        or IsAssignable[p.type, _BehaviorMethod[Any, Any, Any, Any]]
+        or IsAssignable[p.type, _BehaviorMethod[Any, Any, Any, Any, Any]]
+        or IsAssignable[p.type, _BehaviorMethod[Any, Any, Any, Any, Any, Any]]
     ]
 ]
 
@@ -200,19 +208,25 @@ class _RuntimeBehaviorRefMethods[A: BehaviorActor]:
 
         behavior_method = self.behavior_methods[name]
 
-        async def call_behavior[I, O](param: I) -> O:
+        async def call_behavior[*I, O](
+            *params: *I, timeout: float | None = None
+        ) -> O | Timeout:
 
             async with future[str]() as (fut, fut_ref):
                 serialized_message = _BehaviorMessage(
                     behavior_name=name,
-                    serialized_input=behavior_method.input_adapter.dump_json(param),
+                    serialized_input=behavior_method.input_adapter.dump_json(params),  # type:ignore
                     reply_to=fut_ref,
                 )
                 _get_system().call_actor_threadsafe(
                     self.actor_address, serialized_message.model_dump_json()
                 )
 
-                serialized_return_value = await fut
+                try:
+                    with fail_after(timeout):
+                        serialized_return_value = await fut
+                except TimeoutError:
+                    return Timeout()
 
                 result = behavior_method.output_adapter.validate_json(
                     serialized_return_value

@@ -2,9 +2,24 @@
 
 from anyio import sleep
 
-from actorium import Actor, Mailbox, Timeout, get_system, run, spawn
-from actorium.actors import RpcRef
+from actorium import (
+    Actor,
+    BehaviorActor,
+    BehaviorRef,
+    Mailbox,
+    Timeout,
+    behavior,
+    get_system,
+    run,
+    spawn,
+)
 from actorium.transports import TcpClient
+
+
+class Calculator(BehaviorActor):
+    @behavior
+    async def double_it(self, number: int) -> int:
+        raise NotImplementedError
 
 
 class Main(Actor[None]):
@@ -13,11 +28,11 @@ class Main(Actor[None]):
 
         async with spawn(TcpClient, "localhost", 9000):
             for i in range(100):
-                double_ref = await system.lookup("double", RpcRef[int, int], timeout=1)
-                if isinstance(double_ref, Timeout):
+                calc = await system.lookup("calc", BehaviorRef[Calculator], timeout=1)
+                if isinstance(calc, Timeout):
                     print("Timeout while trying to resolve RPC endpoint.")
                 else:
-                    result = await double_ref.ask(10, timeout=1)
+                    result = await calc.be.double_it(10, timeout=1)
                     if isinstance(result, Timeout):
                         print("Timeout while calling RPC endpoint.")
                     else:

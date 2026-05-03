@@ -7,7 +7,7 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Literal, Protocol
+from typing import AsyncGenerator, Literal, Protocol
 from uuid import UUID, uuid4
 
 import anyio
@@ -27,23 +27,13 @@ class MessageForActor(BaseModel):
     message: str  # json-serialized
 
 
-class StartActor(BaseModel):
-    type_: Literal["start-actor"] = "start-actor"
-    factory: Any
-    args: list[Any]
-    kwargs: dict[str, Any]
-    reply_to: Ref[Any]
-
-
-class StopActor(BaseModel):
-    type_: Literal["stop-actor"] = "stop-actor"
-    actor: Ref[Any]
+type GatewayMessage = MessageForActor | PublishRoute | Register | Unregister
 
 
 class RegisterRoute(BaseModel):
     type_: Literal["announce-route"] = "announce-route"
     system_id: SystemId
-    gateway: Ref[MessageForActor]
+    gateway: Ref[GatewayMessage]
     # lease_time_seconds: float
 
 
@@ -69,14 +59,10 @@ class UnsubscribeState(BaseModel):
     unsubscribe_key: UUID
 
 
-class TerminateSystem(BaseModel):
-    type_: Literal["terminate-system"] = "terminate-system"
-
-
 class Register(BaseModel):
     type: Literal["register"] = "register"
     name: str
-    actor_ref: Ref[Any]
+    address: ActorAddress
     lease_time_seconds: float
     unregister_key: UUID
 
@@ -90,7 +76,7 @@ class Unregister(BaseModel):
     unregister_key: UUID
 
 
-type LookupResultMessage = Ref[Any] | None
+type LookupResultMessage = ActorAddress | None
 
 
 class Lookup(BaseModel):
@@ -101,10 +87,7 @@ class Lookup(BaseModel):
 
 type ActorSystemMessage = (
     MessageForActor
-    | StartActor
-    | StopActor
     | RegisterRoute
-    | TerminateSystem
     | Register
     | Unregister
     | Lookup
@@ -121,7 +104,7 @@ _ACTOR_SYSTEM: ContextVar[ActorSystem | None] = ContextVar("_ACTOR_SYSTEM")
 
 @dataclass
 class _NameRegistration:
-    ref: Ref[Any]
+    address: ActorAddress
     unregister_key: UUID
 
 
@@ -135,10 +118,10 @@ class ActorSystem(Actor[ActorSystemMessage]):
         self._actor_mailboxes: dict[ActorId, RawMailbox] = {}
         self._system_id = uuid4()
 
-        self._routes: dict[SystemId, list[Ref[MessageForActor]]] = defaultdict(list)
+        self._routes: dict[SystemId, list[Ref[GatewayMessage]]] = defaultdict(list)
         # Add self-route.
         self._routes[self._system_id].append(
-            Ref[MessageForActor](
+            Ref[GatewayMessage](
                 actor_address=ActorAddress(
                     system_id=self._system_id,
                     actor_id="SYSTEM",
@@ -151,7 +134,7 @@ class ActorSystem(Actor[ActorSystemMessage]):
         self._actor_mailboxes["SYSTEM"] = self._mailbox
 
         # Name registration.
-        self._name_to_actor_ref: TtlMap[str, _NameRegistration] = TtlMap()
+        self._name_to_actor_address: TtlMap[str, _NameRegistration] = TtlMap()
 
         # unsubscribe_key to subscription registration
         self._subscriptions: TtlMap[UUID, Ref[PublishMessage]] = TtlMap()
@@ -219,8 +202,6 @@ class ActorSystem(Actor[ActorSystemMessage]):
             match msg:
                 case MessageForActor(actor_address=actor_address, message=message):
                     await self._call_actor(actor_address, message)
-                case StartActor():
-                    self._start_actor(msg)
                 case RegisterRoute(system_id=system_id, gateway=gateway):
                     if gateway.actor_address.system_id != self._system_id:
                         print(
@@ -235,40 +216,39 @@ class ActorSystem(Actor[ActorSystemMessage]):
                             if subscription != gateway:
                                 subscription.tell(PublishRoute(system_id=system_id))
 
-                case TerminateSystem():
-                    self._task_group.cancel_scope.cancel()
                 case Register(
                     name=name,
-                    actor_ref=actor_ref,
+                    address=address,
                     lease_time_seconds=lease_time_seconds,
                     unregister_key=unregister_key,
                 ):
-                    self._name_to_actor_ref.set(
+                    self._name_to_actor_address.set(
                         name,
-                        _NameRegistration(ref=actor_ref, unregister_key=unregister_key),
+                        _NameRegistration(
+                            address=address, unregister_key=unregister_key
+                        ),
                         ttl_seconds=lease_time_seconds,
                     )
 
                     # Broadcast to all subscriptions.
                     # Except towards the route where this name originates from.
                     for _, subscription in self._subscriptions.items():
-                        if (
-                            subscription
-                            not in self._routes[actor_ref.actor_address.system_id]
-                        ):
+                        if subscription not in self._routes[address.system_id]:
                             subscription.tell(msg)
 
                 case Unregister(name=name, unregister_key=unregister_key):
-                    registration = self._name_to_actor_ref.get(name)
+                    registration = self._name_to_actor_address.get(name)
                     if (
                         registration is not None
                         and registration.unregister_key == unregister_key
                     ):
-                        self._name_to_actor_ref.pop(name)
+                        self._name_to_actor_address.pop(name)
                     # TODO broadcast `Unregister`!
                 case Lookup(name=name, reply_to=reply_to):
-                    registration = self._name_to_actor_ref.get(name)
-                    reply_to.tell(None if registration is None else registration.ref)
+                    registration = self._name_to_actor_address.get(name)
+                    reply_to.tell(
+                        None if registration is None else registration.address
+                    )
                 case SubscribeState(
                     reply_to=reply_to,
                     lease_time_seconds=lease_time_seconds,
@@ -288,21 +268,17 @@ class ActorSystem(Actor[ActorSystemMessage]):
                         name,
                         registration,
                         ttl_seconds,
-                    ) in self._name_to_actor_ref.items_with_remaining_ttl():
+                    ) in self._name_to_actor_address.items_with_remaining_ttl():
                         reply_to.tell(
                             Register(
                                 name=name,
-                                actor_ref=registration.ref,
+                                address=registration.address,
                                 lease_time_seconds=ttl_seconds,
                                 unregister_key=registration.unregister_key,
                             )
                         )
                 case UnsubscribeState(unsubscribe_key=unsubscribe_key):
                     self._subscriptions.pop(unsubscribe_key)
-
-    def _start_actor(self, msg: StartActor) -> None:
-        ref = self.start(msg.factory, *msg.args, **msg.kwargs)
-        msg.reply_to.tell(ref)
 
     @asynccontextmanager
     async def spawn[A, R: AnyRef, **P](
@@ -340,7 +316,7 @@ class ActorSystem(Actor[ActorSystemMessage]):
                 traceback.print_exc()
 
             if options.terminate_system_on_complete:
-                self.ref().tell(TerminateSystem())
+                self._task_group.cancel_scope.cancel()
 
         self._task_group.start_soon(run_wrapper, mailbox)
 
@@ -425,36 +401,7 @@ def run[A, R: AnyRef, **P](
 
 
 class ActorSystemRef(Ref[ActorSystemMessage]):
-    @asynccontextmanager
-    async def spawn[A, R: AnyRef, **P](
-        self, factory: ActorFactory[A, R, P], /, *args: P.args, **kwargs: P.kwargs
-    ) -> AsyncGenerator[R]:
-        from ..actors.future import future
-
-        # If we are within an actor in this actor system,
-        system = ActorSystem.current()
-        if system is None:
-            raise Exception("Actor system not running.")
-
-        if system._system_id == self.actor_address.system_id:
-            async with system.spawn(factory, *args, **kwargs) as ref:
-                yield ref
-                return
-
-        # XXX: This does not work! The creation of an actor can't depend on the
-        #      creation of another actor, like 'future'.
-        # ONLY IF THIS IS A REFERENCE TO *ANOTHER* ACTOR SYSTEM!!
-        async with future[R]() as (f, reply_to):
-            self.tell(
-                StartActor(factory=factory, args=args, kwargs=kwargs, reply_to=reply_to)
-            )
-            ref = await f
-            try:
-                yield ref
-            finally:
-                self.tell(StopActor(actor=ref))
-
-    async def lookup[T: Ref[Any]](
+    async def lookup[T: AnyRef](
         self, name: str, type_: _ActorRefType[T], timeout: float | None = None
     ) -> T | Timeout:
         from ..actors.future import future
@@ -465,15 +412,15 @@ class ActorSystemRef(Ref[ActorSystemMessage]):
                     self.tell(Lookup(name=name, reply_to=reply_to))
 
                     with move_on_after(1.0):
-                        ref = await f
-                        if ref is not None:
-                            return type_(actor_address=ref.actor_address)
+                        actor_address = await f
+                        if actor_address is not None:
+                            return type_(actor_address=actor_address)
                     await sleep(0.1)
 
         return Timeout()
 
     @asynccontextmanager
-    async def register(self, actor_ref: Ref[Any], name: str) -> AsyncGenerator[None]:
+    async def register(self, actor_ref: AnyRef, name: str) -> AsyncGenerator[None]:
         publish_interval = 5
         lease_time = 10
         unregister_key = uuid4()
@@ -487,7 +434,7 @@ class ActorSystemRef(Ref[ActorSystemMessage]):
             while True:
                 self.tell(
                     Register(
-                        actor_ref=actor_ref,
+                        address=actor_ref.actor_address,
                         name=name,
                         lease_time_seconds=lease_time,
                         unregister_key=unregister_key,
@@ -532,7 +479,7 @@ class ActorSystemRef(Ref[ActorSystemMessage]):
             self.tell(UnsubscribeState(unsubscribe_key=unsubscribe_key))
 
 
-class _ActorRefType[T: Ref[Any]](Protocol):
+class _ActorRefType[T: AnyRef](Protocol):
     def __call__(self, *, actor_address: ActorAddress) -> T: ...
 
 
@@ -571,9 +518,8 @@ async def spawn[A, R: AnyRef, **P](
 
         async with spawn(Collector, param="some-param") as ref: ...
     """
-    from .system import get_system
+    # If we are within an actor in this actor system,
+    system = _get_system()
 
-    system = get_system()
-
-    async with system.spawn(factory, *args, **kwargs) as actor_ref:
-        yield actor_ref
+    async with system.spawn(factory, *args, **kwargs) as ref:
+        yield ref
