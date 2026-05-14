@@ -1,56 +1,71 @@
-from collections.abc import AsyncGenerator, Callable, Coroutine
-from contextlib import asynccontextmanager
-from typing import Any
+from collections.abc import Callable, Coroutine
+from inspect import signature
+from typing import TYPE_CHECKING, Any, final
 
 from ..core import Actor, Mailbox, spawn
-from .signals import SignalRef, signal
+from .signals import signal
 
 __all__ = [
     "computed",
 ]
 
 
-@asynccontextmanager
-async def computed[T, U, V](
-    type_: type[T],
-    /,
-    func: Callable[[T, U], Coroutine[Any, Any, V]],
-    reactive1: SignalRef[T],
-    reactive2: SignalRef[U],
-) -> AsyncGenerator[SignalRef[V]]:
-    """
-    Produces a reactive `SignalRef` actor for which it's value is computed
-    using `func`, observing `reactive1` and `reactive2`. Sometimes also called
-    a 'memo'.
+@final
+class _Unknown:
+    pass
 
-    Usage::
 
-        async def evaluate(value1, value2) -> int:
-            " Whenever `ref1` or `ref2` change, this computed is reevaluated."
-            ...
+def computed[T, U, V](
+    reactive1: signal[T],
+    reactive2: signal[U],
+    name: str | None = None,
+) -> Callable[
+    [Callable[[T, U], Coroutine[Any, Any, V]]],
+    signal[V],
+]:
 
-        async with computed(evaluate, ref1, ref2) -> ref3: ...
+    def decorator(func: Callable[[T, U], Coroutine[Any, Any, V]]) -> signal[V]:
+        """
+        Produces a reactive `SignalRef` actor for which it's value is computed-
+        using `func`, observing `reactive1` and `reactive2`. Sometimes also called
+        a 'memo'.
 
-    Evaluation is eager, cached and the cache is invalidated when any of the
-    observed actors change.
+        Usage::
 
-    A computed can be used as a simple "effect" if the returned `ref` is not
-    needed.
-    """
-    value1 = await reactive1.get()
-    value2 = await reactive2.get()
+            @computed(ref1, ref2)
+            async def ref3(value1, value2) -> int:
+                " Whenever `ref1` or `ref2` change, this computed is reevaluated."
+                ...
 
-    initial = await func(value1, value2)
 
-    async with signal[type_](initial) as result:
+        Evaluation is eager, cached and the cache is invalidated when any of the
+        observed actors change.
+
+        A computed can be used as a simple "effect" if the returned `ref` is not
+        needed.
+        """
+        value1: T | _Unknown = _Unknown()
+        value2: U | _Unknown = _Unknown()
+
+        sig = signature(func)
+
+        if TYPE_CHECKING:
+            result = signal[V].new()
+        else:
+            result = signal[sig.return_annotation].new(name=name)
+
+        async def recompute() -> None:
+            if not isinstance(value1, _Unknown) and not isinstance(value2, _Unknown):
+                new_value = await func(value1, value2)
+                result.set(new_value)
 
         class Update1(Actor[T]):
             async def run(self, mailbox: Mailbox[T]) -> None:
                 nonlocal value1
 
-                async for value1 in mailbox:
-                    new_value = await func(value1, value2)
-                    result.set(new_value)
+                async with reactive1.subscribe(mailbox.ref()):
+                    async for value1 in mailbox:
+                        await recompute()
 
             def message_type(self) -> type[T]:
                 return reactive1.data_type()
@@ -59,19 +74,18 @@ async def computed[T, U, V](
             async def run(self, mailbox: Mailbox[U]) -> None:
                 nonlocal value2
 
-                async for value2 in mailbox:
-                    new_value = await func(value1, value2)
-                    result.set(new_value)
+                async with reactive2.subscribe(mailbox.ref()):
+                    async for value2 in mailbox:
+                        await recompute()
 
             def message_type(self) -> type[U]:
                 return reactive2.data_type()
 
-        async with (
-            # Spawn two actors for receiving corresponding updates.
-            spawn(Update1) as update1_actor,
-            spawn(Update2) as update2_actor,
-            # Subscribe to updates coming from both reactive objects.
-            reactive1.subscribe(update1_actor),
-            reactive2.subscribe(update2_actor),
-        ):
-            yield result
+        # Spawn two actors for receiving corresponding updates.
+        # Subscribe to updates coming from both reactive objects.
+        spawn(Update1)
+        spawn(Update2)
+
+        return result
+
+    return decorator

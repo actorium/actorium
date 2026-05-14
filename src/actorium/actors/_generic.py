@@ -8,12 +8,12 @@ __all__ = [
 ]
 
 
-class GenericFunction[**P, R](Protocol):
-    def __call__(self, *a: P.args, **kw: P.kwargs) -> R: ...
-    def __getitem__(self, params: Any) -> Callable[P, R]: ...
+class GenericFunction[*P, R](Protocol):
+    def __call__(self, *a: *P) -> R: ...
+    def __getitem__(self, params: Any) -> Callable[[*P], R]: ...
 
 
-def generic_function[**P, R](func: Callable[P, R]) -> GenericFunction[P, R]:
+def generic_function[*P, R](func: Callable[[*P], R]) -> GenericFunction[*P, R]:
     """
     Function decorator that allows calling a generic function with type
     parameters, and expose the actual types within the function.
@@ -25,7 +25,7 @@ def generic_function[**P, R](func: Callable[P, R]) -> GenericFunction[P, R]:
         @cache
         def __getitem__(
             self, type_params: TypeVar | tuple[TypeVar, ...]
-        ) -> Callable[P, R]:
+        ) -> Callable[[*P], R]:
             if not isinstance(type_params, tuple):
                 type_params = (type_params,)
 
@@ -64,14 +64,14 @@ def generic_function[**P, R](func: Callable[P, R]) -> GenericFunction[P, R]:
                     closure=replace_closure(f),
                 )
 
-            return replace_func(func)  # type:ignore[arg-type]
+            return replace_func(func)  # type:ignore[return-value,arg-type]
 
         # `__call__` staticmethod to make `inspect.signature` work on the
         # `GenericFunction`.
         @staticmethod
         @wraps(func)
-        def __call__(*a: P.args, **kw: P.kwargs) -> R:
-            return func(*a, **kw)
+        def __call__(*a: *P) -> R:
+            return func(*a)
 
     wrapper.__doc__ = func.__doc__
     return wrapper()

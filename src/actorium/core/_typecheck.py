@@ -4,7 +4,7 @@ from typing import assert_type
 
 from .actor import Actor, BehaviorActor, Mailbox, Ref, behavior
 from .system import spawn
-from .types import ActorAddress, Timeout
+from .types import ActorAddress
 
 __all__ = []
 
@@ -18,15 +18,14 @@ async def __test_pydantic_actor_type_inference() -> None:
     class Collector(Actor[int]):
         async def run(self, mailbox: Mailbox[int]) -> None: ...
 
-    async with spawn(Collector) as ref:
-        assert_type(ref, Ref[int])
+    ref = spawn(Collector)
+    assert_type(ref, Ref[int])
 
     class CollectorWithArgs(Actor[int]):
         def __init__(self, a: int, b: str) -> None: ...
         async def run(self, mailbox: Mailbox[int]) -> None: ...
 
-    async with spawn(CollectorWithArgs, 1, b="text"):
-        pass
+    spawn(CollectorWithArgs, 1, "text")
 
     class CustomRef(Ref[int]):
         pass
@@ -36,8 +35,8 @@ async def __test_pydantic_actor_type_inference() -> None:
         def actor_ref(self, actor_address: ActorAddress) -> CustomRef:
             return CustomRef(actor_address=actor_address)
 
-    async with spawn(CollectorWithCustomRef) as ref:
-        assert_type(ref, CustomRef)
+    ref2 = spawn(CollectorWithCustomRef)
+    assert_type(ref2, CustomRef)
 
 
 async def __test_behavior_actor_type_inference() -> None:
@@ -52,9 +51,9 @@ async def __test_behavior_actor_type_inference() -> None:
 
     class Main(Actor[None]):
         async def run(self, mailbox: Mailbox[None]) -> None:
-            async with spawn(Calc) as ref:
-                result = await ref.be.double_it(4)
-                assert_type(result, int | Timeout)
+            ref = spawn(Calc)
+            result = await ref.be.double_it(4)
+            assert_type(result, int)
 
-                result = await ref.be.is_even(4)
-                assert_type(result, bool | Timeout)
+            result = await ref.be.is_even(4)
+            assert_type(result, bool)

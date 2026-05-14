@@ -15,9 +15,10 @@ class Calc(BehaviorActor):
 
 class Main(Actor[None]):
     async def run(self, mailbox: Mailbox[None]) -> None:
-        async with spawn(Calc) as calc_ref:
-            result = await calc_ref.be.double_it(4)
-            print("Double of 4 is", result)
+        calc_ref = spawn(Calc)
+
+        result = await calc_ref.be.double_it(4)
+        print("Double of 4 is", result)
 
 
 if __name__ == "__main__":

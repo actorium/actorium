@@ -24,6 +24,10 @@ class TtlMap[K, V]:
             if v is not None:
                 yield k, v
 
+    def keys(self) -> Iterable[K]:
+        for k, _ in self.items():
+            yield k
+
     def items_with_remaining_ttl(self) -> Iterable[tuple[K, V, float]]:
         now = time.time()
 

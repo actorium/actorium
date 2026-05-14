@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Literal, assert_never, get_args
+from typing import TYPE_CHECKING, Literal, assert_never, final, get_args
 
 from pydantic import BaseModel
 
 from ..core import Actor, ActorAddress, Mailbox, Ref, spawn
-from ._generic import generic_function
-from .future import future
+from .future import Future
 
 __all__ = [
     # Messages.
@@ -17,7 +16,6 @@ __all__ = [
     "Get",
     "SignalMsg",
     # Ref.
-    "SignalRef",
     "signal",
 ]
 
@@ -46,18 +44,24 @@ type SignalMsg[T] = Subscribe[T] | Unsubscribe[T] | Get[T] | Set[T]
 type SignalMsgType[T] = type[Subscribe[T] | Unsubscribe[T] | Get[T]]
 
 
-class _Signal[T](Actor[SignalMsg[T]]):
-    def __init__(self, initial: T) -> None:
+@final
+class _Unknown:
+    "Sentinel for when the value of a signal is still unknown."
+
+
+class _SignalActor[T](Actor[SignalMsg[T]]):
+    def __init__(self, initial: T | _Unknown) -> None:
         self.value = initial
         self.subscriptions: set[Ref[T]] = set()
+        self.get_waiters: set[Ref[T]] = set()
 
     def data_type(self) -> type[T]:
         return get_args(self.__orig_class__)[0]  # type:ignore
 
-    def actor_ref(self, actor_address: ActorAddress) -> SignalRef[T]:
+    def actor_ref(self, actor_address: ActorAddress) -> signal[T]:
         if not TYPE_CHECKING:
             T = self.data_type()
-        return SignalRef[T](actor_address=actor_address)
+        return signal[T](actor_address=actor_address)
 
     def message_type(self) -> SignalMsgType[T]:
         return SignalMsg[self.data_type()]  # type:ignore
@@ -68,6 +72,11 @@ class _Signal[T](Actor[SignalMsg[T]]):
 
         self.value = value
 
+        if len(self.get_waiters) > 0:
+            for reply_to in self.get_waiters:
+                reply_to.tell(value)
+            self.get_waiters = set()
+
         for subscription in self.subscriptions:
             subscription.tell(value)
 
@@ -75,30 +84,47 @@ class _Signal[T](Actor[SignalMsg[T]]):
         async for msg in mailbox:
             match msg:
                 case Get(reply_to=reply_to):
-                    reply_to.tell(self.value)
+                    # If unknown, wait until a value is set.
+                    if isinstance(self.value, _Unknown):
+                        self.get_waiters.add(reply_to)
+                    else:
+                        reply_to.tell(self.value)
                 case Set(value=value):
                     self._set(value)
                 case Subscribe(actor=actor):
                     self.subscriptions.add(actor)
+                    if not isinstance(self.value, _Unknown):
+                        actor.tell(self.value)
                 case Unsubscribe(actor=actor):
                     self.subscriptions.discard(actor)
                 case _ as x:
                     assert_never(x)
 
 
-class SignalRef[T](Ref[SignalMsg[T]]):
+class signal[T](Ref[SignalMsg[T]]):
     """
     Reference to a `signal` actor with helper methods for getting, setting or
     subscribing to the state.
     """
 
+    @classmethod
+    def new(
+        cls,
+        initial: T | _Unknown = _Unknown(),
+        name: str | None = None,
+    ) -> signal[T]:
+        if not TYPE_CHECKING:
+            T = cls.data_type()
+
+        return spawn(_SignalActor[T], initial, name=name)
+
     async def get(self) -> T:
         if not TYPE_CHECKING:
             T = self.data_type()
 
-        async with future[T]() as (f, reply_to):
-            self.tell(Get[T](reply_to=reply_to))
-            return await f
+        f = Future[T]()
+        self.tell(Get[T](reply_to=f.actor))
+        return await f.result()
 
     def set(self, value: T) -> None:
         if not TYPE_CHECKING:
@@ -128,20 +154,3 @@ class SignalRef[T](Ref[SignalMsg[T]]):
             yield
         finally:
             self.tell(Unsubscribe[T](actor=reply_to))
-
-
-@generic_function
-@asynccontextmanager
-async def signal[T](initial: T) -> AsyncGenerator[SignalRef[T]]:
-    """
-    Create a reactive signal. This produces an actor for observing the signal
-    and retrieving its value and a setter for storing a new value.
-
-    Usage::
-
-        async with signal[int](initial=0) as count:
-            count.set(...)
-            value = await count.get()
-    """
-    async with spawn(_Signal[T], initial) as ref:
-        yield ref

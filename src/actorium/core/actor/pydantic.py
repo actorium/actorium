@@ -7,7 +7,7 @@ from pydantic import BaseModel, TypeAdapter
 from typing_extensions import TypeForm
 
 from ..types import ActorAddress
-from .base import BaseActor, RawMailbox
+from .base import BaseActor, RawMailbox, SerializedMessage
 
 __all__ = [
     "Actor",
@@ -69,9 +69,13 @@ class Mailbox[T]:
         return self._ref
 
     async def next(self) -> T:
-        serialized_msg = await self._raw_mailbox.next()
-        msg: T = self._type_adapter.validate_json(serialized_msg)
-        return msg
+        message = await self._raw_mailbox.next()
+
+        if isinstance(message, SerializedMessage):
+            msg: T = self._type_adapter.validate_json(message.data)
+            return msg
+
+        return self._type_adapter.validate_python(message)
 
     def __aiter__(self) -> Self:
         return self
@@ -114,8 +118,9 @@ class Ref[T](BaseModel):
         """
         from ..system import _get_system
 
-        type_adapter: TypeAdapter[T] = TypeAdapter(self.message_type())
+        _get_system().call_actor_soon(self.actor_address, message, self._serialize)
 
-        serialized_message = type_adapter.dump_json(message).decode()
-
-        _get_system().call_actor_threadsafe(self.actor_address, serialized_message)
+    @classmethod
+    def _serialize(cls, message: T) -> SerializedMessage:
+        type_adapter: TypeAdapter[T] = TypeAdapter(cls.message_type())
+        return SerializedMessage(data=type_adapter.dump_json(message).decode())

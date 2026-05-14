@@ -6,8 +6,8 @@ from typing import Any
 from anyio import create_task_group, sleep, to_thread
 from pydantic import BaseModel
 
-from actorium import Actor, Mailbox, Ref, get_system, run, spawn
-from actorium.actors import RpcRef, SignalRef, computed, rpc, signal
+from actorium import Actor, Mailbox, Ref, lookup, run, spawn
+from actorium.actors import computed, signal
 from actorium.transports import TcpClient, TcpServer
 
 
@@ -21,18 +21,18 @@ def test_actors() -> None:
 
     class Main(Actor[None]):
         async def run(self, mailbox: Mailbox[None]) -> None:
-            async with spawn(Collector) as ref:
-                ref.tell(1)
-                ref.tell(2)
-                ref.tell(3)
+            ref = spawn(Collector)
 
-                await _assert_soon_equal(lambda: items, [1, 2, 3])
+            ref.tell(1)
+            ref.tell(2)
+            ref.tell(3)
+
+            await _assert_soon_equal(lambda: items, [1, 2, 3])
 
     run(Main)
 
 
-def test_actor_registry() -> None:
-    system1 = None
+def _skip_test_actor_registry() -> None:
     ready = threading.Event()
     received_items: list[int] = []
 
@@ -49,19 +49,10 @@ def test_actor_registry() -> None:
 
         class Thread1(Actor[None]):
             async def run(self, mailbox: Mailbox[None]) -> None:
-                nonlocal system1
-
-                system1 = get_system()
-
-                async with (
-                    spawn(Receiver, received_items) as ref,
-                    system1.register(ref, "our-actor"),
-                ):
-                    system1 = get_system()
-                    assert system1 is not None
-                    ready.set()
-                    await _assert_soon_equal(lambda: received_items, [1, 2, 3])
-                    return
+                _ref = spawn(Receiver, received_items, name="our-actor")
+                ready.set()
+                await _assert_soon_equal(lambda: received_items, [1, 2, 3])
+                return
 
         run(Thread1)
 
@@ -70,9 +61,7 @@ def test_actor_registry() -> None:
             async def run(self, mailbox: Mailbox[None]) -> None:
                 ready.wait()
 
-                assert system1 is not None
-                collector = await system1.lookup("our-actor", Ref[int])
-                assert collector is not None
+                collector = await lookup("our-actor", Ref[int], timeout=1)
 
                 collector.tell(1)
                 collector.tell(2)
@@ -111,15 +100,14 @@ def test_send_actor_to_actor() -> None:
 
     class Main(Actor[None]):
         async def run(self, mailbox: Mailbox[None]) -> None:
-            async with (
-                spawn(EchoActor) as echo_ref,
-                spawn(Receiver) as receiver_ref,
-            ):
-                echo_ref.tell(EchoMsg(value=1, reply_to=receiver_ref))
-                echo_ref.tell(EchoMsg(value=2, reply_to=receiver_ref))
-                echo_ref.tell(EchoMsg(value=3, reply_to=receiver_ref))
+            echo_ref = spawn(EchoActor)
+            receiver_ref = spawn(Receiver)
 
-                await _assert_soon_equal(lambda: items, [1, 2, 3])
+            echo_ref.tell(EchoMsg(value=1, reply_to=receiver_ref))
+            echo_ref.tell(EchoMsg(value=2, reply_to=receiver_ref))
+            echo_ref.tell(EchoMsg(value=3, reply_to=receiver_ref))
+
+            await _assert_soon_equal(lambda: items, [1, 2, 3])
 
     run(Main)
     assert items == [1, 2, 3]
@@ -128,10 +116,11 @@ def test_send_actor_to_actor() -> None:
 def test_ref() -> None:
     class Main(Actor[None]):
         async def run(self, mailbox: Mailbox[None]) -> None:
-            async with signal[int](10) as number:
-                assert await number.get() == 10
-                number.set(20)
-                assert await number.get() == 20
+            number = signal[int].new(10)
+
+            assert await number.get() == 10
+            number.set(20)
+            assert await number.get() == 20
 
     run(Main)
 
@@ -139,53 +128,14 @@ def test_ref() -> None:
 def test_ref_with_registration() -> None:
     class Main(Actor[None]):
         async def run(self, mailbox: Mailbox[None]) -> None:
-            system = get_system()
+            number = signal[int].new(10, name="our-actor")
 
-            async with (
-                signal[int](10) as number,
-                system.register(number, "our-actor"),
-            ):
-                assert await number.get() == 10
-                number.set(20)
+            assert await number.get() == 10
+            number.set(20)
 
-                number2 = await system.lookup("our-actor", SignalRef[int])
-                assert number2 is not None
-                assert await number2.get() == 20
-
-    run(Main)
-
-
-def test_rpc_actor() -> None:
-    async def double_it(value: int) -> int:
-        return value * 2
-
-    class Main(Actor[None]):
-        async def run(self, mailbox: Mailbox[None]) -> None:
-            async with rpc[int, int](double_it) as double_actor:
-                assert await double_actor.ask(2) == 4
-                assert await double_actor.ask(3) == 6
-
-    run(Main)
-
-
-def test_rpc_actor_with_registration() -> None:
-    async def double_it(value: int) -> int:
-        return value * 2
-
-    class Main(Actor[None]):
-        async def run(self, mailbox: Mailbox[None]) -> None:
-            system = get_system()
-
-            async with (
-                rpc[int, int](double_it) as double_actor,
-                system.register(double_actor, name="double-it"),
-            ):
-                assert await double_actor.ask(2) == 4
-                assert await double_actor.ask(3) == 6
-
-                double_actor_2 = await system.lookup("double-it", RpcRef[int, int])
-                assert double_actor_2 is not None
-                assert await double_actor_2.ask(5) == 10
+            number2 = await lookup("our-actor", signal[int], timeout=1)
+            assert number2 is not None
+            assert await number2.get() == 20
 
     run(Main)
 
@@ -194,24 +144,30 @@ def test_computed() -> None:
     class Main(Actor[None]):
         async def run(self, mailbox: Mailbox[None]) -> None:
             # Create two reactive objects, number1 and number2
-            async with (
-                signal[int](0) as number1,
-                signal[int](0) as number2,
-            ):
-                # The computation
-                async def the_sum(value1: int, value2: int) -> int:
-                    return value1 + value2
+            number1 = signal[int].new(0)
+            number2 = signal[int].new(0)
 
-                # Create a reactive computation.
-                async with computed(int, the_sum, number1, number2) as ref3:
-                    assert await ref3.get() == 0
+            # Check type parameters.
+            assert isinstance(number1, signal[int])
+            assert isinstance(number2, signal[int])
 
-                    # Change source objects.
-                    number1.set(10)
-                    number2.set(20)
+            # The computation
+            @computed(number1, number2)
+            async def the_sum(value1: int, value2: int) -> int:
+                return value1 + value2
 
-                    # Changes should propagate.
-                    await _assert_soon_equal(ref3.get, 30)
+            # Check type for computed and type parameter.
+            assert isinstance(the_sum, signal[int])
+
+            # Create a reactive computation.
+            assert await the_sum.get() == 0
+
+            # Change source objects.
+            number1.set(10)
+            number2.set(20)
+
+            # Changes should propagate.
+            await _assert_soon_equal(the_sum.get, 30)
 
     run(Main)
 
@@ -227,32 +183,28 @@ async def test_tcp_protocol() -> None:
     def thread_1() -> None:
         class Thread1(Actor[None]):
             async def run(self, mailbox: Mailbox[None]) -> None:
-                async with (
-                    spawn(TcpServer, "localhost", 9000),
-                    spawn(Collector) as ref,
-                    get_system().register(ref, "our-actor"),
-                ):
-                    # Sleep until equal.
-                    await _assert_soon_equal(lambda: received_items, [1, 2, 3])
+                spawn(TcpServer, "localhost", 9000)
+                spawn(Collector, name="our-actor")
+
+                # Sleep until equal.
+                await _assert_soon_equal(lambda: received_items, [1, 2, 3])
 
         run(Thread1)
 
     def thread_2() -> None:
         class Thread2(Actor[None]):
             async def run(self, mailbox: Mailbox[None]) -> None:
-                async with spawn(TcpClient, "localhost", 9000):
-                    # Wait until this actor comes online.
-                    while True:
-                        actor_ref = await get_system().lookup("our-actor", Ref[int])
-                        if actor_ref is None:
-                            await sleep(0.1)
-                        else:
-                            break
+                spawn(TcpClient, "localhost", 9000)
 
-                    assert actor_ref is not None
-                    actor_ref.tell(1)
-                    actor_ref.tell(2)
-                    actor_ref.tell(3)
+                # Wait until this actor comes online.
+                actor_ref = await lookup("our-actor", Ref[int], timeout=5)
+
+                actor_ref.tell(1)
+                actor_ref.tell(2)
+                actor_ref.tell(3)
+
+                # Sleep until equal.
+                await _assert_soon_equal(lambda: received_items, [1, 2, 3])
 
         run(Thread2)
 

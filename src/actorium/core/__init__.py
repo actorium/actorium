@@ -12,8 +12,8 @@ from .actor import (
     Ref,
     behavior,
 )
-from .system import ActorSystem, get_system, run, spawn
-from .types import ActorAddress, ActorId, SystemId, Timeout
+from .system import ActorSystem, lookup, run, spawn
+from .types import ActorAddress, ActorId, SystemId
 
 __all__ = [
     # actor.py
@@ -31,10 +31,9 @@ __all__ = [
     "ActorSystem",
     "run",
     "spawn",
-    "get_system",
+    "lookup",
     # types.py
     "ActorId",
     "SystemId",
     "ActorAddress",
-    "Timeout",
 ]

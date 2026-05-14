@@ -3,6 +3,8 @@ from actorium.core import BehaviorActor, behavior
 
 
 def test_behavior_actors() -> None:
+    did_run = False
+
     class Calc(BehaviorActor):
         @behavior
         async def double_it(self, value: int) -> int:
@@ -14,17 +16,25 @@ def test_behavior_actors() -> None:
 
     class Main(Actor[None]):
         async def run(self, mailbox: Mailbox[None]) -> None:
-            async with spawn(Calc) as ref:
-                result = await ref.be.double_it(4)
-                assert result == 8
+            nonlocal did_run
 
-                result = await ref.be.plus_one(4)
-                assert result == 5
+            ref = spawn(Calc)
+            result = await ref.be.double_it(4)
+            assert result == 8
+
+            result = await ref.be.plus_one(4)
+            assert result == 5
+            did_run = True
 
     run(Main)
 
+    # Ensure that we did wait until the main actor terminated.
+    assert did_run
+
 
 def test_behavior_multiple_arguments() -> None:
+    did_run = False
+
     class Calc(BehaviorActor):
         @behavior
         async def sum(self, a: int, b: int) -> int:
@@ -32,8 +42,13 @@ def test_behavior_multiple_arguments() -> None:
 
     class Main(Actor[None]):
         async def run(self, mailbox: Mailbox[None]) -> None:
-            async with spawn(Calc) as ref:
-                result = await ref.be.sum(1, 2)
-                assert result == 3
+            nonlocal did_run
+
+            ref = spawn(Calc)
+            result = await ref.be.sum(1, 2)
+            assert result == 3
+
+            did_run = True
 
     run(Main)
+    assert did_run

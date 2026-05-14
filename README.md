@@ -36,19 +36,20 @@ class MyActor(Actor[str]):
 async def example() -> None:
     async with actor_system():
         # Spawn actor and obtain a reference to it.
-        async with spawn(MyActor) as actor_ref:
-            # Thanks to type inference, Mypy knows that:
-            # - `actor_ref` is of type `ActorRef[str]`.
-            # Further, messages are automatically serialized/deserialized using
-            # a Pydantic `TypeAdapter[str]`.
+        actor_ref = spawn(MyActor)
 
-            # Send messages to this actor through the reference.
-            actor_ref.tell("Hello")
-            actor_ref.tell("World")
+        # Thanks to type inference, Mypy knows that:
+        # - `actor_ref` is of type `ActorRef[str]`.
+        # Further, messages are automatically serialized/deserialized using
+        # a Pydantic `TypeAdapter[str]`.
 
-            # This simple actor doesn't acknowledge delivery, allow some time
-            # for the messages to be processed.
-            await sleep(1)
+        # Send messages to this actor through the reference.
+        actor_ref.tell("Hello")
+        actor_ref.tell("World")
+
+        # This simple actor doesn't acknowledge delivery, allow some time
+        # for the messages to be processed.
+        await sleep(1)
 
 if __name__ == "__main__":
     run(example)
@@ -76,9 +77,10 @@ class Calc(BehaviorActor):
 
 class Main(Actor[None]):
     async def run(self, mailbox: Mailbox[None]) -> None:
-        async with spawn(Calc) as calc_ref:
-            result = await calc_ref.be.double_it(4)
-            print("Double of 4 is", result)
+        calc_ref = spawn(Calc)
+
+        result = await calc_ref.be.double_it(4)
+        print("Double of 4 is", result)
 
 
 if __name__ == "__main__":

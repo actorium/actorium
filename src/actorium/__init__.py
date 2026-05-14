@@ -6,9 +6,8 @@ from .core import (
     BehaviorRef,
     Mailbox,
     Ref,
-    Timeout,
     behavior,
-    get_system,
+    lookup,
     run,
     spawn,
 )
@@ -23,7 +22,6 @@ __all__ = [
     "behavior",
     # system.
     "run",
-    "get_system",
     "spawn",
-    "Timeout",
+    "lookup",
 ]

@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Protocol, Self
 
 from anyio import create_memory_object_stream
+from pydantic import BaseModel
 
 from ..types import ActorAddress
 
@@ -13,6 +14,7 @@ __all__ = [
     "RawMailbox",
     "BaseActor",
     "ActorFactory",
+    "SerializedMessage",
 ]
 
 
@@ -29,24 +31,30 @@ class AnyRef(Protocol):
     def actor_address(self) -> ActorAddress: ...
 
 
+class SerializedMessage(BaseModel):
+    data: str
+
+
 class RawMailbox:
     """
     Mailbox for a single actor from where the actor can receive messages.
     """
 
     def __init__(self) -> None:
-        self._sender, self._receiver = create_memory_object_stream[str](math.inf)
+        self._sender, self._receiver = create_memory_object_stream[
+            object | SerializedMessage
+        ](math.inf)
 
-    def feed(self, serialized_msg: str) -> None:
-        self._sender.send_nowait(serialized_msg)
+    def feed(self, message: object | SerializedMessage) -> None:
+        self._sender.send_nowait(message)
 
-    async def next(self) -> str:
+    async def next(self) -> object | SerializedMessage:
         return await self._receiver.receive()
 
     def __aiter__(self) -> Self:
         return self
 
-    async def __anext__(self) -> str:
+    async def __anext__(self) -> object | SerializedMessage:
         return await self.next()
 
 
@@ -65,7 +73,7 @@ class BaseActor(ABC):
         """
 
 
-class ActorFactory[A, R: AnyRef, **P](Protocol):
+class ActorFactory[A: BaseActor, R: AnyRef, *P](Protocol):
     """
     Actor protocol: a class *definition*, not instance, which:
 
@@ -76,7 +84,7 @@ class ActorFactory[A, R: AnyRef, **P](Protocol):
       first argument.
     """
 
-    def __call__(self, *args: P.args, **kwars: P.kwargs) -> A:
+    def __call__(self, *args: *P) -> A:
         "Actor `__init__` signature."
 
     def actor_ref(self, state: A, actor_address: ActorAddress) -> R: ...

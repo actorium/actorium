@@ -2,19 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from anyio import (
-    connect_unix,
-    create_unix_listener,
-    move_on_after,
-    sleep,
-    sleep_forever,
-)
+from anyio import connect_unix, create_unix_listener, move_on_after, sleep
 from anyio.abc import SocketStream
 
-from ..actors.future import future
 from ..core import Actor, Mailbox
-from ..core.system import spawn
-from .tcp import _TcpConnection
+from .tcp import handle_tcp_connection
 
 __all__ = [
     "UnixServer",
@@ -41,8 +33,7 @@ class UnixServer(Actor[None]):
                 await listener.aclose()
 
     async def _handle_connection(self, client: SocketStream) -> None:
-        async with spawn(_TcpConnection, client):
-            await sleep_forever()
+        await handle_tcp_connection(client)
 
 
 class UnixClient(Actor[None]):
@@ -60,6 +51,4 @@ class UnixClient(Actor[None]):
             else:
                 backoff_seconds = 0.5
                 async with client:
-                    async with future[None]() as (done_future, ref):
-                        async with spawn(_TcpConnection, client, ref):
-                            await done_future
+                    await handle_tcp_connection(client)

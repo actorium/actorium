@@ -24,8 +24,8 @@ from typemap_extensions import (
     NewProtocol,
 )
 
-from ..types import ActorAddress, Timeout
-from .base import BaseActor, RawMailbox
+from ..types import ActorAddress
+from .base import BaseActor, RawMailbox, SerializedMessage
 from .pydantic import Ref
 
 __all__ = [
@@ -55,9 +55,7 @@ class _BehaviorMethod[A: BehaviorActor, *I, O]:
         # `NewProtocol`.
 
         @staticmethod
-        async def behavior_method(
-            *param: *I, timeout: float | None = None
-        ) -> O | Timeout:
+        async def behavior_method(*param: *I, timeout: float | None = None) -> O:
             raise NotImplementedError
 
 
@@ -95,8 +93,8 @@ class BehaviorActor(BaseActor):
                 return value * 2
 
         # Then, in another actor:
-        async with spawn(Calc) as ref:
-            result = await ref.be.double_it(4)
+        ref = spawn(Calc)
+        result = await ref.be.double_it(4)
     """
 
     _behavior_methods_: ClassVar[Mapping[str, _BehaviorMethod[Any, Any, Any]]]
@@ -127,7 +125,11 @@ class BehaviorActor(BaseActor):
         self, raw_mailbox: RawMailbox, actor_address: ActorAddress
     ) -> None:
         async for msg in raw_mailbox:
-            behavior_message = _BehaviorMessage.model_validate_json(msg)
+            if isinstance(msg, SerializedMessage):
+                behavior_message = _BehaviorMessage.model_validate_json(msg.data)
+            else:
+                assert isinstance(msg, _BehaviorMessage)
+                behavior_message = msg
 
             try:
                 method = self._behavior_methods_[behavior_message.behavior_name]
@@ -202,35 +204,33 @@ class _RuntimeBehaviorRefMethods[A: BehaviorActor]:
         return [name for name in self.behavior_methods.keys()]
 
     def __getattr__(self, name: str) -> Callable[[Any], Coroutine[Any, Any, Any]]:
-        from actorium.actors.future import future
+        from actorium.actors.future import Future
 
         from ..system import _get_system
 
         behavior_method = self.behavior_methods[name]
 
-        async def call_behavior[*I, O](
-            *params: *I, timeout: float | None = None
-        ) -> O | Timeout:
+        async def call_behavior[*I, O](*params: *I, timeout: float | None = None) -> O:
 
-            async with future[str]() as (fut, fut_ref):
-                serialized_message = _BehaviorMessage(
-                    behavior_name=name,
-                    serialized_input=behavior_method.input_adapter.dump_json(params),  # type:ignore
-                    reply_to=fut_ref,
-                )
-                _get_system().call_actor_threadsafe(
-                    self.actor_address, serialized_message.model_dump_json()
-                )
+            future = Future[str]()
 
-                try:
-                    with fail_after(timeout):
-                        serialized_return_value = await fut
-                except TimeoutError:
-                    return Timeout()
+            message = _BehaviorMessage(
+                behavior_name=name,
+                serialized_input=behavior_method.input_adapter.dump_json(params),  # type:ignore
+                reply_to=future.actor,
+            )
+            _get_system().call_actor_soon(
+                self.actor_address,
+                message=message,
+                serialize=lambda msg: SerializedMessage(data=msg.model_dump_json()),
+            )
 
-                result = behavior_method.output_adapter.validate_json(
-                    serialized_return_value
-                )
-                return cast(O, result)
+            with fail_after(timeout):
+                serialized_return_value = await future.result()
+
+            result = behavior_method.output_adapter.validate_json(
+                serialized_return_value
+            )
+            return cast(O, result)
 
         return call_behavior
