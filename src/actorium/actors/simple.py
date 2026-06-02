@@ -1,38 +1,41 @@
-from __future__ import annotations
-
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, Literal, Self, get_args
+from typing import TYPE_CHECKING, Any, Self, get_args
 
-from pydantic import BaseModel, TypeAdapter
+from typing import Never
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 from typing_extensions import TypeForm
 
-from ..types import ActorAddress
-from .base import BaseActor, RawMailbox, SerializedMessage
+from actorium.actor import BaseActor, RawMailbox, SerializedMessage
+from actorium.types import ActorAddress
 
 __all__ = [
-    "Actor",
+    "SimpleActor",
     "Mailbox",
-    "Ref",
+    "SimpleRef",
 ]
 
 
-class Actor[T](BaseActor):
+class SimpleActor[T](BaseActor):
     """
-    Pydantic based actor implementation.
+    Simple Pydantic based actor implementation that receives messages of a
+    given type `T`.
 
     This deserializes all incoming messages using the type: `T`, which
     should be a Pydantic `BaseModel` or anything supported by Pydantic's
     `TypeAdapter`.
     """
 
-    def actor_ref(self, actor_address: ActorAddress) -> Ref[T]:
-        if not TYPE_CHECKING:
-            if hasattr(self, "__orig_class__"):
-                T = get_args(self.__orig_class__)[0]
-            else:
-                T = get_args(self.__orig_bases__[0])[0]  # type:ignore
+    def message_type(self) -> TypeForm[T]:
+        if hasattr(self, "__orig_class__"):
+            return get_args(self.__orig_class__)[0]  # type:ignore
+        else:
+            return get_args(self.__orig_bases__[0])[0]  # type:ignore
 
-        return Ref[T](actor_address=actor_address)
+    def actor_ref(self, actor_address: ActorAddress) -> SimpleRef[T]:
+        if not TYPE_CHECKING:
+            T = self.message_type()
+
+        return SimpleRef[T](actor_address=actor_address)
 
     async def actor_run(
         self, raw_mailbox: RawMailbox, actor_address: ActorAddress
@@ -57,18 +60,27 @@ class Mailbox[T]:
     """
 
     def __init__(
-        self, message_type: TypeForm[T], raw_mailbox: RawMailbox, ref: Ref[T]
+        self, message_type: TypeForm[T], raw_mailbox: RawMailbox, ref: SimpleRef[T]
     ) -> None:
         self._message_type = message_type
         self._raw_mailbox = raw_mailbox
         self._ref = ref
 
-        self._type_adapter: TypeAdapter[T] = TypeAdapter(message_type)
+        self._type_adapter: None | TypeAdapter[T] = None
 
-    def ref(self) -> Ref[T]:
+        if message_type is not Never:  # type: ignore
+            try:
+                self._type_adapter = TypeAdapter(message_type)
+            except BaseException:
+                breakpoint()
+
+    def ref(self) -> SimpleRef[T]:
         return self._ref
 
     async def next(self) -> T:
+        if self._type_adapter is None:
+            raise TypeError("Can't receive messages in `SimpleActor[Never]`.")
+
         message = await self._raw_mailbox.next()
 
         if isinstance(message, SerializedMessage):
@@ -84,7 +96,7 @@ class Mailbox[T]:
         return await self.next()
 
 
-class Ref[T](BaseModel):
+class SimpleRef[T](BaseModel):
     """
     Reference/handle to an actor that has been spawned somewhere, possibly in
     another process.
@@ -93,20 +105,24 @@ class Ref[T](BaseModel):
     part of a message to any other actor.
     """
 
-    # Discriminator, for when it's used in a union with other types.
-    type_: Literal["actor-ref"] = "actor-ref"
+    model_config = ConfigDict(frozen=True)
 
     actor_address: ActorAddress
 
-    model_config = {"frozen": True}
-
     def model_post_init(self, __context: object) -> None:
-        TypeAdapter(self.message_type())
+        if self.message_type() is Never:  # type: ignore
+            # `Never` means we can't receive messages.
+            return
+
+        try:
+            TypeAdapter(self.message_type())
+        except BaseException:
+            breakpoint()
 
     @classmethod
     def message_type(cls) -> type[Any]:
         # NOTE: The return type is actually `type[T]`, but it doesn't matter in
-        #       this context. We want `Ref[T]` to be covariant.
+        #       this context. We want `SimpleRef[T]` to be covariant.
         try:
             return cls.__pydantic_generic_metadata__["args"][0]  # type:ignore
         except IndexError:
@@ -116,7 +132,7 @@ class Ref[T](BaseModel):
         """
         Send message to the underlying actor.
         """
-        from ..system import _get_system
+        from actorium.system import _get_system
 
         _get_system().call_actor_soon(self.actor_address, message, self._serialize)
 

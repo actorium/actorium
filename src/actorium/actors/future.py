@@ -1,7 +1,9 @@
 import asyncio
 from typing import TYPE_CHECKING, get_args
 
-from ..core import Actor, Mailbox, spawn
+from actorium.system import spawn
+
+from .simple import Mailbox, SimpleActor
 
 __all__ = [
     "FutureActor",
@@ -9,7 +11,7 @@ __all__ = [
 ]
 
 
-class FutureActor[T](Actor[T]):
+class FutureActor[T](SimpleActor[T]):
     def __init__(self, fut: asyncio.Future[T]) -> None:
         self._future = fut
 

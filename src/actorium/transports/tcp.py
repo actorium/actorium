@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from ipaddress import IPv4Address
 from logging import getLogger
 
@@ -16,8 +14,9 @@ from anyio.abc import SocketStream
 from anyio.streams.memory import MemoryObjectSendStream
 from pydantic import TypeAdapter
 
-from ..core import Actor, Mailbox
-from ..core.system import GatewayMessage, connect_gateway
+from actorium.actors import Mailbox, SimpleActor
+from actorium.system import GatewayMessage, connect_gateway
+
 from ._line_protocol import LineReceiver
 
 __all__ = [
@@ -33,9 +32,9 @@ _adapter: TypeAdapter[GatewayMessage] = TypeAdapter(GatewayMessage)
 _logger = getLogger(__name__)
 
 
-class TcpServer(Actor[None]):
+class TcpServer(SimpleActor[None]):
     """
-    Actor that listens on the given host/port and accept connection from
+    Actor that listens on the given host/port and accepts connections from
     another actor system through a `TcpClient`.
     """
 
@@ -71,7 +70,7 @@ class TcpServer(Actor[None]):
         await handle_tcp_connection(client)
 
 
-class TcpClient(Actor[None]):
+class TcpClient(SimpleActor[None]):
     def __init__(self, host: Host, port: int) -> None:
         self.host = host
         self.port = port

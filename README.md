@@ -24,17 +24,17 @@ uv pip install actorium
 
 ```python
 #!/usr/bin/env python
-from anyio import run, sleep, Actor
+from anyio import run, sleep, SimpleActor
 from actorium import actor_system, spawn
 
-class MyActor(Actor[str]):
+class MyActor(SimpleActor[str]):
     "Simple actor that prints whatever it receives."
 
     async def receive(msg: str) -> None:
         print(f"Received {msg} in actor.")
 
-async def example() -> None:
-    async with actor_system():
+class Main(SimpleActor[None]):
+    async def run(self, mailbox: Mailbox[None]) -> None:
         # Spawn actor and obtain a reference to it.
         actor_ref = spawn(MyActor)
 
@@ -52,7 +52,7 @@ async def example() -> None:
         await sleep(1)
 
 if __name__ == "__main__":
-    run(example)
+    run(Main)
 ```
 
 ## Behavior style actors
@@ -63,14 +63,14 @@ actor reference.
 
 ```python
 #!/usr/bin/env python
-from actorium import Actor, BehaviorActor, Mailbox, behavior, run, spawn
+from actorium import Actor, BehaviorActor, Mailbox, rpc, run, spawn
 
 class Calc(BehaviorActor):
-    @behavior
+    @rpc
     async def double_it(self, value: int) -> int:
         return value * 2
 
-    @behavior
+    @rpc
     async def plus_one(self, value: int) -> int:
         return value + 1
 
@@ -79,7 +79,7 @@ class Main(Actor[None]):
     async def run(self, mailbox: Mailbox[None]) -> None:
         calc_ref = spawn(Calc)
 
-        result = await calc_ref.be.double_it(4)
+        result = await calc_ref.rpc.double_it(4)
         print("Double of 4 is", result)
 
 

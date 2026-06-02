@@ -1,23 +1,25 @@
 #!/usr/bin/env python
 
-from actorium import Actor, BehaviorActor, Mailbox, behavior, run, spawn
+from typing import Never
+
+from actorium import BehaviorActor, Mailbox, SimpleActor, rpc, run, spawn
 
 
 class Calc(BehaviorActor):
-    @behavior
+    @rpc
     async def double_it(self, value: int) -> int:
         return value * 2
 
-    @behavior
+    @rpc
     async def plus_one(self, value: int) -> int:
         return value + 1
 
 
-class Main(Actor[None]):
-    async def run(self, mailbox: Mailbox[None]) -> None:
+class Main(SimpleActor[Never]):
+    async def run(self, mailbox: Mailbox[Never]) -> None:
         calc_ref = spawn(Calc)
 
-        result = await calc_ref.be.double_it(4)
+        result = await calc_ref.rpc.double_it(4)
         print("Double of 4 is", result)
 
 

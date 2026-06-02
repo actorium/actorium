@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 from anyio import connect_unix, create_unix_listener, move_on_after, sleep
@@ -16,7 +14,7 @@ __all__ = [
 
 class UnixServer(Actor[None]):
     """
-    Actor that listens on the given unix path and accept connection from
+    Actor that listens on the given unix path and accepts connections from
     another actor system through a `UnixClient`.
     """
 

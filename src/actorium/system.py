@@ -1,7 +1,4 @@
-from __future__ import annotations
-
 import contextvars
-import traceback
 from asyncio import CancelledError, Future, get_running_loop
 from collections import defaultdict
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -24,16 +21,22 @@ from anyio.from_thread import start_blocking_portal
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from pydantic import BaseModel
 
-from .actor import ActorFactory, AnyRef, BaseActor, RawMailbox
-from .actor.base import SerializedMessage
-from .ttl_map import TtlMap
-from .types import ActorAddress, ActorId, SystemId
+from actorium.actor import (
+    ActorFactory,
+    AnyRef,
+    BaseActor,
+    RawMailbox,
+    SerializedMessage,
+)
+from actorium.types import ActorAddress, ActorId, SystemId
+from actorium.utils import TtlMap
 
 __all__ = [
     "ActorSystem",
     "lookup",
     "run",
     "spawn",
+    "GatewayMessage",
 ]
 
 type GatewayMessage = MessageForActor | PublishRoute | Register | Unregister
@@ -298,7 +301,7 @@ class ActorSystem:
         Gateways should subscribe to the system state, and forward all
         `PublishMessage` to the other system.
         """
-        # To gateaway
+        # To gateway
         to_gateway_writer, to_gateway_reader = create_memory_object_stream[
             GatewayMessage
         ]()

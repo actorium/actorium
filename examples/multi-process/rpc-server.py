@@ -1,19 +1,21 @@
 #!/usr/bin/env python
+from typing import Never
+
 from anyio import sleep_forever
 
-from actorium import Actor, BehaviorActor, Mailbox, behavior, run, spawn
+from actorium import BehaviorActor, Mailbox, SimpleActor, rpc, run, spawn
 from actorium.transports import TcpServer
 
 
 class Calculator(BehaviorActor):
-    @behavior
+    @rpc
     async def double_it(self, number: int) -> int:
         print("Got double-it RPC request!")
         return number * 2
 
 
-class Main(Actor[None]):
-    async def run(self, mailbox: Mailbox[None]) -> None:
+class Main(SimpleActor[Never]):
+    async def run(self, mailbox: Mailbox[Never]) -> None:
         spawn(TcpServer, "localhost", 9000)
         spawn(Calculator, name="calc")
 

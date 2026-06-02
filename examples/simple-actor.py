@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 
+from typing import Never
+
 from anyio import sleep
 
-from actorium import Actor, Mailbox, run, spawn
+from actorium import Mailbox, SimpleActor, run, spawn
 
 
-class MyActor(Actor[str]):
+class MyActor(SimpleActor[str]):
     async def run(self, mailbox: Mailbox[str]) -> None:
         "Simple actor that prints whatever it receives."
         while True:
@@ -13,8 +15,8 @@ class MyActor(Actor[str]):
             print(f"Received {msg} in actor.")
 
 
-class Main(Actor[None]):
-    async def run(self, mailbox: Mailbox[None]) -> None:
+class Main(SimpleActor[Never]):
+    async def run(self, mailbox: Mailbox[Never]) -> None:
         actor_ref = spawn(MyActor)
 
         # Send messages to this actor through the reference.

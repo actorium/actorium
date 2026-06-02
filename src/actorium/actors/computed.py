@@ -1,9 +1,13 @@
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from inspect import signature
-from typing import TYPE_CHECKING, Any, final
+from typing import TYPE_CHECKING, Any, Self, Union, final
 
-from ..core import Actor, Mailbox, spawn
-from .signals import signal
+from typemap_extensions import Iter
+
+from actorium.system import spawn
+
+from .behaviors import BehaviorActor, BehaviorRef, behavior
+from .signals import Signal, SignalRef, SignalSubscribeWithId, Undefined
 
 __all__ = [
     "computed",
@@ -15,77 +19,79 @@ class _Unknown:
     pass
 
 
-def computed[T, U, V](
-    reactive1: signal[T],
-    reactive2: signal[U],
+def computed[*T, V](
+    *reactives: *[SignalRef[t] for t in Iter[tuple[*T]]],
     name: str | None = None,
-) -> Callable[
-    [Callable[[T, U], Coroutine[Any, Any, V]]],
-    signal[V],
-]:
+) -> Callable[[Callable[[*T], V]], SignalRef[V]]:
+    """
+    Decorator for producing a new reactive `signal` based on the given signals
+    by applying the decorated function on the input signals whenever any value
+    changes. Sometimes also called a 'memo'.
 
-    def decorator(func: Callable[[T, U], Coroutine[Any, Any, V]]) -> signal[V]:
-        """
-        Produces a reactive `SignalRef` actor for which it's value is computed-
-        using `func`, observing `reactive1` and `reactive2`. Sometimes also called
-        a 'memo'.
+    Usage::
 
-        Usage::
-
-            @computed(ref1, ref2)
-            async def ref3(value1, value2) -> int:
-                " Whenever `ref1` or `ref2` change, this computed is reevaluated."
-                ...
+        @computed(ref1, ref2)
+        def ref3(value1, value2) -> int:
+            " Whenever `ref1` or `ref2` change, this computed is reevaluated."
+            ...
 
 
-        Evaluation is eager, cached and the cache is invalidated when any of the
-        observed actors change.
+    Evaluation is eager, cached and the cache is invalidated when any of the
+    observed actors change.
 
-        A computed can be used as a simple "effect" if the returned `ref` is not
-        needed.
-        """
-        value1: T | _Unknown = _Unknown()
-        value2: U | _Unknown = _Unknown()
+    A computed can be used as a simple "effect" if the returned `ref` is not
+    needed.
+    """
 
+    def decorator(func: Callable[[*T], V]) -> SignalRef[V]:
         sig = signature(func)
 
-        if TYPE_CHECKING:
-            result = signal[V].new()
-        else:
-            result = signal[sig.return_annotation].new(name=name)
+        if not TYPE_CHECKING:
+            V = sig.return_annotation
 
-        async def recompute() -> None:
-            if not isinstance(value1, _Unknown) and not isinstance(value2, _Unknown):
-                new_value = await func(value1, value2)
-                result.set(new_value)
+        result = spawn(Signal[V], Undefined, name=name)
 
-        class Update1(Actor[T]):
-            async def run(self, mailbox: Mailbox[T]) -> None:
-                nonlocal value1
-
-                async with reactive1.subscribe(mailbox.ref()):
-                    async for value1 in mailbox:
-                        await recompute()
-
-            def message_type(self) -> type[T]:
-                return reactive1.data_type()
-
-        class Update2(Actor[U]):
-            async def run(self, mailbox: Mailbox[U]) -> None:
-                nonlocal value2
-
-                async with reactive2.subscribe(mailbox.ref()):
-                    async for value2 in mailbox:
-                        await recompute()
-
-            def message_type(self) -> type[U]:
-                return reactive2.data_type()
-
-        # Spawn two actors for receiving corresponding updates.
-        # Subscribe to updates coming from both reactive objects.
-        spawn(Update1)
-        spawn(Update2)
+        # Spawn observer actor that calls the given func when we receive
+        # updates.
+        if not TYPE_CHECKING:  # mypy crashes on the following line.
+            spawn(_Observer[*T, V], func, result, *reactives)
 
         return result
 
     return decorator
+
+
+# class _Observer[*T, V](Actor[tuple[int, Union[*T]]]):
+class _Observer[*T, V](BehaviorActor):
+    """
+    Actor that subscribes to all the given signals, recomputes the outcome
+    using the given callable and stores it in the signal.
+    """
+
+    def __init__(
+        self,
+        func: Callable[[*T], V],
+        result: SignalRef[V],
+        *reactives: *[SignalRef[t] for t in Iter[tuple[*T]]],
+    ) -> None:
+        self._func = func
+        self._result = result
+        self._reactives = reactives
+
+        self._values: list[Union[*T] | _Unknown] = [_Unknown() for _ in self._reactives]
+
+    async def actor_init(self, ref: BehaviorRef[Self]) -> None:
+        for i, reactive in enumerate(self._reactives):
+            spawn(SignalSubscribeWithId, reactive, ref, i)
+
+    @behavior
+    # async def changed(self, id: int, value: Union[*T]) -> None:
+    def changed(self, id: int, value: Any) -> None:
+        self._values[id] = value
+
+        # Recompute when there are no Unknowns left.
+        if any(isinstance(val, _Unknown) for val in self._values):
+            return
+
+        new_value = self._func(*self._values)  # type: ignore
+        self._result.set(new_value)
