@@ -31,8 +31,8 @@ Homepage = "https://github.com/actorium/actorium"
 [dependency-groups]
 dev = [
     'pytest',
-    #'mypy',
-    "mypy @ git+https://github.com/msullivan/mypy-typemap.git",
+    'mypy',
+    # "mypy @ git+https://github.com/msullivan/mypy-typemap.git",
 ]
 
 [tool.mypy]
@@ -55,7 +55,7 @@ warn_unused_configs = true
 warn_unused_ignores = true
 enable_incomplete_feature = ["TypeForm"]
 
-plugins = ['pydantic.mypy']
+plugins = ['pydantic.mypy', 'actorium.mypy']
 
 [build-system]
 requires = ["setuptools>=68"]

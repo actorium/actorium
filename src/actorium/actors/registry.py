@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING, Never, get_args
 
 from anyio import move_on_after
 
-from actorium.types import ActorAddress
 from actorium.utils import TtlMap
 
+from ..system import spawn
 from .behaviors import BehaviorActor, BehaviorRef, behavior, rpc
-from .simple import Mailbox, SimpleActor
+from .simple import SimpleActor
 
 __all__ = [
     "Registry",
@@ -40,10 +40,11 @@ class Registry[T](BehaviorActor):
         self._registered_data: TtlMap[str, T] = TtlMap()
         self._get_waiters: dict[str, set[Future[T]]] = defaultdict(set)
 
-    def actor_ref(self, actor_address: ActorAddress) -> RegistryRef[T]:
+    def actor_ref(self) -> RegistryRef[T]:
         if not TYPE_CHECKING:
             T = get_args(self.__orig_class__)[0]
-        return RegistryRef[T](actor_address=actor_address)
+
+        return RegistryRef[T](**super().actor_ref().__dict__)
 
     @behavior
     def publish(self, name: str, value: T, ttl_seconds: float) -> None:
@@ -90,6 +91,9 @@ class RegistryRef[T](BehaviorRef[Registry[T]]):
 
         return _RegistryRef
 
+    def register(self, name: str, value: T) -> None:
+        spawn(Registration[T], self, name, value)
+
 
 class Registration[T](SimpleActor[Never]):
     """
@@ -102,14 +106,14 @@ class Registration[T](SimpleActor[Never]):
         self.name = name
         self.value = value
 
-    async def run(self, mailbox: Mailbox[Never]) -> None:
+    async def actor_run(self) -> None:
         ttl_seconds = 10.0
         sleep_seconds = 5.0
 
         try:
             while True:
-                self.registry_ref.be.publish(self.name, self.value, ttl_seconds)
+                self.registry_ref.publish(self.name, self.value, ttl_seconds)
                 await sleep(sleep_seconds)
         finally:
             # Immediately unpublish when this actor is terminated.
-            self.registry_ref.be.unpublish(self.name)
+            self.registry_ref.unpublish(self.name)

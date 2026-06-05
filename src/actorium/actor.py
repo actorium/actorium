@@ -1,5 +1,6 @@
 import math
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Protocol, Self
 
 from anyio import create_memory_object_stream
@@ -8,23 +9,11 @@ from pydantic import BaseModel
 from actorium.types import ActorAddress
 
 __all__ = [
-    "AnyRef",
     "RawMailbox",
     "BaseActor",
     "ActorFactory",
     "SerializedMessage",
 ]
-
-
-class AnyRef(Protocol):
-    """
-    Actor reference (proxy) type.
-
-    Some implementations will add helper methods for interaction.
-    """
-
-    @property
-    def actor_address(self) -> ActorAddress: ...
 
 
 class SerializedMessage(BaseModel):
@@ -36,7 +25,8 @@ class RawMailbox:
     Mailbox for a single actor from where the actor can receive messages.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, address: ActorAddress) -> None:
+        self.address = address
         self._sender, self._receiver = create_memory_object_stream[
             object | SerializedMessage
         ](math.inf)
@@ -56,20 +46,24 @@ class RawMailbox:
 
 class BaseActor(ABC):
     @abstractmethod
-    def actor_ref(self, actor_address: ActorAddress) -> AnyRef:
+    def actor_post_init(self, create_mailbox: Callable[[], RawMailbox]) -> None:
+        pass
+
+    @abstractmethod
+    def actor_ref(self) -> object:
         """
         Factory for producing the `ref` proxy that gets produced in the
         `spawn` context manager.
         """
 
     @abstractmethod
-    async def actor_run(self, mailbox: RawMailbox, actor_address: ActorAddress) -> None:
+    async def actor_run(self) -> None:
         """
         Main `run` function of the actor.
         """
 
 
-class ActorFactory[A: BaseActor, R: AnyRef, *P](Protocol):
+class ActorFactory[A: BaseActor, R, *P](Protocol):
     """
     Representation of the actor class *definition*, not the instance. This is
     what is passed as a first argument to the `spawn()` function:
@@ -90,7 +84,15 @@ class ActorFactory[A: BaseActor, R: AnyRef, *P](Protocol):
         the keyword arguments itself.
         """
 
-    def actor_ref(self, state: A, actor_address: ActorAddress) -> R:
+    def actor_post_init(
+        self, state: A, create_mailbox: Callable[[], RawMailbox]
+    ) -> None:
+        """
+        Initialization for specific actor type. This is the place where
+        mailboxes are created.
+        """
+
+    def actor_ref(self, state: A) -> R:
         """
         Actor reference that gets returned by the `spawn()` function after
         starting the actor.
@@ -102,9 +104,7 @@ class ActorFactory[A: BaseActor, R: AnyRef, *P](Protocol):
             protocol represents the class, not the instance.)
         """
 
-    async def actor_run(
-        self, state: A, mailbox: RawMailbox, actor_address: ActorAddress
-    ) -> None:
+    async def actor_run(self, state: A, /) -> None:
         """
         Entry point for the actor. This is where the actor can consume its
         mailbox.

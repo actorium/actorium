@@ -1,22 +1,22 @@
 from anyio import create_task_group, to_thread
 
-from actorium import Mailbox, SimpleActor, SimpleRef, lookup, run, spawn
+from actorium import SimpleActor, SimpleRef, lookup, run, spawn
 from actorium.transports import TcpClient, TcpServer
 
 from .utils import assert_soon_equal
 
 
 async def test_tcp_protocol() -> None:
-    received_items = []
+    received_items: list[int] = []
 
     class Collector(SimpleActor[int]):
-        async def run(self, mailbox: Mailbox[int]) -> None:
-            async for msg in mailbox:
+        async def actor_run(self) -> None:
+            async for (msg,) in self.mailbox:
                 received_items.append(msg)
 
     def thread_1() -> None:
         class Thread1(SimpleActor[None]):
-            async def run(self, mailbox: Mailbox[None]) -> None:
+            async def actor_run(self) -> None:
                 spawn(TcpServer, "localhost", 9000)
                 spawn(Collector, name="our-actor")
 
@@ -27,7 +27,7 @@ async def test_tcp_protocol() -> None:
 
     def thread_2() -> None:
         class Thread2(SimpleActor[None]):
-            async def run(self, mailbox: Mailbox[None]) -> None:
+            async def actor_run(self) -> None:
                 spawn(TcpClient, "localhost", 9000)
 
                 # Wait until this actor comes online.

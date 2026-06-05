@@ -1,17 +1,13 @@
 from asyncio import Future
-from dataclasses import dataclass
-from functools import cache
-from typing import TYPE_CHECKING, ClassVar, Never, final, get_args
+from typing import Never, final
 
 from anyio import sleep
-from typing_extensions import TypeForm
 
 from actorium.system import spawn
-from actorium.types import ActorAddress
 from actorium.utils import TtlSet
 
 from .behaviors import BehaviorActor, BehaviorRef, behavior, rpc
-from .simple import Mailbox, SimpleActor, SimpleRef
+from .simple import SimpleActor, SimpleRef
 
 __all__ = [
     "Undefined",
@@ -33,23 +29,20 @@ class _UndefinedType:
 Undefined = _UndefinedType()
 
 
-class _SubscriptionWithId[T](BehaviorActor):
-    "Subscription interface."
-
-    @behavior
-    def changed(self, id: int, value: T) -> None: ...
-
-
 class Signal[T](BehaviorActor):
     def __init__(self, initial: T | _UndefinedType = Undefined) -> None:
         self.value = initial
         self.subscriptions: TtlSet[SimpleRef[T]] = TtlSet()
         self.get_waiters: set[Future[T]] = set()
 
-    def actor_ref(self, actor_address: ActorAddress) -> SignalRef[T]:
-        if not TYPE_CHECKING:
-            T = get_args(self.__orig_class__)[0]
-        return SignalRef[T](actor_address=actor_address)
+    #    def actor_ref(self) -> SignalRef[T]:
+    #        if not TYPE_CHECKING:
+    #            T = get_args(self.__orig_class__)[0]
+    #        return SignalRef[T](
+    #            behavior_addresses=self._behavior_addresses,
+    #            rpc_addresses=self._rpc_addresses,
+    #        )
+    #        return SignalRef[T](set=self.actors['set'])
 
     @behavior
     def set(self, value: T) -> None:
@@ -87,33 +80,34 @@ class Signal[T](BehaviorActor):
         self.subscriptions.discard(actor)
 
 
-@dataclass(frozen=True)
-class SignalRef[T](BehaviorRef[Signal[T]]):
-    """
-    Reference to a `signal` actor with helper methods for getting, setting or
-    subscribing to the state.
-    """
-
-    _t: ClassVar[TypeForm[T] | None] = None
-
-    # __orig_class__ is not available in __init__, so we use __class_getitem__
-    # as a workaround.
-    @cache
-    @staticmethod
-    def __class_getitem__(item: TypeForm[T]) -> type:
-        class _SignalRef(SignalRef):  # type: ignore
-            _t = item
-            _a = Signal[item]  # type: ignore
-
-        return _SignalRef
-
-    async def get(self, *, timeout: float | None = None) -> T:
-        # NOTE: type:ignore because of a mypy bug.
-        #       inference of `self.be` is wrong at this point.
-        return await self.rpc.get(timeout=timeout)  # type: ignore
-
-    def set(self, value: T) -> None:
-        self.be.set(value)
+type SignalRef[T] = BehaviorRef[Signal[T]]
+# @dataclass(frozen=True)
+# class SignalRef[T](BehaviorRef[Signal[T]]):
+#    """
+#    Reference to a `signal` actor with helper methods for getting, setting or
+#    subscribing to the state.
+#    """
+#
+#    _t: ClassVar[TypeForm[T] | None] = None
+#
+#    # __orig_class__ is not available in __init__, so we use __class_getitem__
+#    # as a workaround.
+#    @cache
+#    @staticmethod
+#    def __class_getitem__(item: TypeForm[T]) -> type:
+#        return type(
+#            f"SignalRef[{item.__name__}]",
+#            (SignalRef,),
+#            {
+#                "_t": item,
+#                "_a": Signal[item],  # type: ignore[valid-type]
+#            },
+#        )
+#
+#    async def get(self, *, timeout: float | None = None) -> T:
+#        # NOTE: type:ignore because of a mypy bug.
+#        #       inference of `self.be` is wrong at this point.
+#        return await self.rpc.get(timeout=timeout)  # type: ignore
 
 
 class SignalSubscribe[T](SimpleActor[Never]):
@@ -121,34 +115,34 @@ class SignalSubscribe[T](SimpleActor[Never]):
         self.signal_ref = signal_ref
         self.reply_to = reply_to
 
-    async def run(self, mailbox: Mailbox[Never]) -> None:
+    async def actor_run(self) -> None:
         ttl_seconds = 10.0
         sleep_seconds = 5.0
 
         try:
             while True:
-                self.signal_ref.be.subscribe(self.reply_to, ttl_seconds)
+                self.signal_ref.subscribe(self.reply_to, ttl_seconds)
                 await sleep(sleep_seconds)
         finally:
             # Immediately unpublish when this actor is terminated.
-            self.signal_ref.be.unsubscribe(self.reply_to)
+            self.signal_ref.unsubscribe(self.reply_to)
 
 
 class SignalSubscribeWithId[T](SimpleActor[T]):
     def __init__(
         self,
         signal_ref: SignalRef[T],
-        reply_to: BehaviorRef[_SubscriptionWithId[T]],
+        reply_to: SimpleRef[int, T],
         id: int,
     ) -> None:
         self._signal_ref = signal_ref
         self._reply_to = reply_to
         self._id = id
 
-    async def run(self, mailbox: Mailbox[T]) -> None:
+    async def actor_run(self) -> None:
         # Tell signal to send updates here.
-        spawn(SignalSubscribe, self._signal_ref, mailbox.ref())
+        spawn(SignalSubscribe[T], self._signal_ref, self.actor_ref())
 
         # Forward to `reply_to` address with ID.
-        async for value in mailbox:
-            self._reply_to.be.changed(self._id, value)
+        async for (value,) in self.mailbox:
+            self._reply_to(self._id, value)

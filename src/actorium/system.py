@@ -19,11 +19,11 @@ from anyio import (
 from anyio.abc import TaskGroup
 from anyio.from_thread import start_blocking_portal
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
+from typing_extensions import TypeForm
 
 from actorium.actor import (
     ActorFactory,
-    AnyRef,
     BaseActor,
     RawMailbox,
     SerializedMessage,
@@ -59,7 +59,7 @@ class PublishRoute(BaseModel):
 class Register(BaseModel):
     type: Literal["register"] = "register"
     name: str
-    address: ActorAddress
+    ref: object  # ActorAddress
     lease_time_seconds: float
     unregister_key: UUID
 
@@ -80,7 +80,7 @@ _CURRENT_ACTOR: ContextVar[BaseActor | None] = ContextVar("_CURRENT_ACTOR")
 
 @dataclass
 class _NameRegistration:
-    address: ActorAddress
+    ref: object
     unregister_key: UUID
 
 
@@ -112,7 +112,7 @@ class ActorSystem:
 
         # Name registration.
         self._name_to_actor_address: dict[str, _NameRegistration] = {}
-        self._name_to_actor_address_waiters: dict[str, set[Future[ActorAddress]]] = (
+        self._name_to_actor_address_waiters: dict[str, set[Future[object]]] = (
             defaultdict(set)
         )
 
@@ -127,7 +127,7 @@ class ActorSystem:
         return _ACTOR_SYSTEM.get()
 
     @classmethod
-    async def create_and_run[A: BaseActor, R: AnyRef, *P](
+    async def create_and_run[A: BaseActor, R, *P](
         cls, factory: ActorFactory[A, R, *P], /, *args: *P
     ) -> None:
         """
@@ -148,7 +148,7 @@ class ActorSystem:
                     await instance._terminate_event.wait()
 
     @classmethod
-    def create_and_run_in_thread[A: BaseActor, R: AnyRef, *P](
+    def create_and_run_in_thread[A: BaseActor, R, *P](
         cls, factory: ActorFactory[A, R, *P], /, *args: *P
     ) -> None:
         """
@@ -159,12 +159,12 @@ class ActorSystem:
         with start_blocking_portal() as portal:
             portal.call(lambda: cls.create_and_run(factory, *args))
 
-    def spawn[A: BaseActor, R: AnyRef, *P](
+    def spawn[A: BaseActor, R, *P](
         self, factory: ActorFactory[A, R, *P], /, *args: *P, name: str | None = None
     ) -> R:
         return self.spawn_with_options(SpawnOptions(), factory, *args, name=name)
 
-    def spawn_with_options[A: BaseActor, R: AnyRef, *P](
+    def spawn_with_options[A: BaseActor, R, *P](
         self,
         options: SpawnOptions,
         factory: ActorFactory[A, R, *P],
@@ -172,14 +172,23 @@ class ActorSystem:
         *args: *P,
         name: str | None = None,
     ) -> R:
+        # Initialize actor class.
         actor = factory(*args)
-        actor_id = uuid4()
 
-        mailbox = RawMailbox()
-        actor_address = ActorAddress(system_id=self._system_id, actor_id=actor_id)
+        # Run `actor_post_init` -> here the actor can create its mailboxes.
+        def create_mailbox() -> RawMailbox:
+            mailbox_id = uuid4()
+            address = ActorAddress(system_id=self._system_id, actor_id=mailbox_id)
+            mailbox = RawMailbox(address=address)
+            self._actor_mailboxes[mailbox_id] = mailbox
+            return mailbox
 
-        self._actor_mailboxes[actor_id] = mailbox
+        actor.actor_post_init(create_mailbox)
 
+        # Get actor reference.
+        ref = factory.actor_ref(actor)
+
+        # Start async `actor_run`, where the mailboxes will be consumed.
         parent_actor = _CURRENT_ACTOR.get(None)
         if parent_actor is None:
             tg = self._task_group
@@ -192,33 +201,31 @@ class ActorSystem:
                 factory,
                 name,
                 actor,
-                mailbox,
-                actor_address,
+                ref,
                 is_main=parent_actor is None,
             )
         )
 
-        return factory.actor_ref(actor, actor_address=actor_address)
+        return ref
 
-    async def _run_wrapper[A: BaseActor, R: AnyRef, *P](
+    async def _run_wrapper[A: BaseActor, R, *P](
         self,
         factory: ActorFactory[A, R, *P],
         name: str | None,
         actor: A,
-        mailbox: RawMailbox,
-        actor_address: ActorAddress,
+        ref: object,
         is_main: bool,
     ) -> None:
         async with AsyncExitStack() as stack:
             if name is not None:
-                await stack.enter_async_context(self._register(actor_address, name))
+                await stack.enter_async_context(self._register(ref, name))
 
             with _CURRENT_ACTOR.set(actor):
                 async with create_task_group() as tg:
                     self._actor_to_task_group[actor] = tg
 
                     try:
-                        await factory.actor_run(actor, mailbox, actor_address)
+                        await factory.actor_run(actor)
                         tg.cancel_scope.cancel()
                     except CancelledError:
                         raise
@@ -233,23 +240,24 @@ class ActorSystem:
                             self._terminate_event.set()
 
     @asynccontextmanager
-    async def _register(
-        self, actor_address: ActorAddress, name: str
-    ) -> AsyncGenerator[None]:
+    async def _register(self, ref: object, name: str) -> AsyncGenerator[None]:
         unregister_key = uuid4()
 
+        # Serialize
+        ref = TypeAdapter(type(ref)).dump_python(ref, mode="json")
+
         self._name_to_actor_address[name] = _NameRegistration(
-            address=actor_address, unregister_key=unregister_key
+            ref=ref, unregister_key=unregister_key
         )
 
         # Unblock `lookup()` calls waiting for a registration.
         for fut in self._name_to_actor_address_waiters.get(name, set()):
             if not fut.done():
-                fut.set_result(actor_address)
+                fut.set_result(ref)
 
         # Broadcast to all subscriptions.
         register_msg = Register(
-            address=actor_address,
+            ref=ref,
             name=name,
             lease_time_seconds=10,
             unregister_key=unregister_key,
@@ -272,19 +280,19 @@ class ActorSystem:
             self._name_to_actor_address.pop(msg.name)
         # TODO broadcast `Unregister`!
 
-    async def lookup(self, name: str, timeout: float | None = None) -> ActorAddress:
+    async def lookup(self, name: str, timeout: float | None = None) -> object:
         # Look for local registration.
         registration = self._name_to_actor_address.get(name)
         if registration is not None:
-            return registration.address
+            return registration.ref
 
         # Look for registration through any gateway.
         for gateway in self._gateways:
             registration = gateway.registered_names.get(name)
             if registration is not None:
-                return registration.address
+                return registration.ref
 
-        f = Future[ActorAddress]()
+        f = Future[object]()
         self._name_to_actor_address_waiters[name].add(f)
         try:
             with fail_after(timeout):
@@ -317,7 +325,7 @@ class ActorSystem:
                 await to_gateway_writer.send(
                     Register(
                         name=name,
-                        address=registration.address,
+                        ref=registration.ref,
                         lease_time_seconds=10,  # TODO: proper lease time.
                         unregister_key=registration.unregister_key,
                     )
@@ -337,7 +345,7 @@ class ActorSystem:
                         await to_gateway_writer.send(
                             Register(
                                 name=name,
-                                address=registration.address,
+                                ref=registration.ref,
                                 lease_time_seconds=10,  # TODO: proper lease time.
                                 unregister_key=registration.unregister_key,
                             )
@@ -373,14 +381,14 @@ class ActorSystem:
 
                         case Register(
                             name=name,
-                            address=address,
+                            ref=ref,
                             lease_time_seconds=lease_time_seconds,
                             unregister_key=unregister_key,
                         ):
                             this_gateway.registered_names.set(
                                 name,
                                 _NameRegistration(
-                                    address=address,
+                                    ref=ref,
                                     unregister_key=unregister_key,
                                 ),
                                 ttl_seconds=lease_time_seconds,
@@ -391,7 +399,7 @@ class ActorSystem:
                                 name, set()
                             ):
                                 if not fut.done():
-                                    fut.set_result(address)
+                                    fut.set_result(ref)
 
                         case Unregister(name=name, unregister_key=unregister_key):
                             registration = this_gateway.registered_names.get(name)
@@ -465,9 +473,7 @@ class SpawnOptions:
     respawn_on_failure: bool = False
 
 
-def run[A: BaseActor, R: AnyRef, *P](
-    factory: ActorFactory[A, R, *P], /, *args: *P
-) -> None:
+def run[A: BaseActor, R, *P](factory: ActorFactory[A, R, *P], /, *args: *P) -> None:
     async def main() -> None:
         await ActorSystem.create_and_run(factory, *args)
 
@@ -475,7 +481,7 @@ def run[A: BaseActor, R: AnyRef, *P](
     ctx.run(anyio.run, main)
 
 
-class _ActorRefType[T: AnyRef](Protocol):
+class _ActorRefType[T](Protocol):
     def __call__(self, *, actor_address: ActorAddress) -> T: ...
 
 
@@ -486,7 +492,7 @@ def _get_system() -> ActorSystem:
     return system
 
 
-def spawn[A: BaseActor, R: AnyRef, *P](
+def spawn[A: BaseActor, R, *P](
     factory: ActorFactory[A, R, *P], /, *args: *P, name: str | None = None
 ) -> R:
     """
@@ -515,13 +521,12 @@ def spawn[A: BaseActor, R: AnyRef, *P](
     return system.spawn(factory, *args, name=name)
 
 
-async def lookup[T: AnyRef](
-    name: str, type_: _ActorRefType[T], timeout: float | None = None
-) -> T:
+async def lookup[T](name: str, type_: TypeForm[T], timeout: float | None = None) -> T:
     system = _get_system()
 
-    actor_address = await system.lookup(name, timeout=timeout)
-    return type_(actor_address=actor_address)
+    value = await system.lookup(name, timeout=timeout)
+
+    return TypeAdapter(type_).validate_python(value)
 
 
 @asynccontextmanager

@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, get_args
 
 from actorium.system import spawn
 
-from .simple import Mailbox, SimpleActor
+from .simple import SimpleActor
 
 __all__ = [
     "FutureActor",
@@ -18,9 +18,10 @@ class FutureActor[T](SimpleActor[T]):
     def message_type(self) -> type[T]:
         return get_args(self.__orig_class__)[0]  # type:ignore
 
-    async def run(self, mailbox: Mailbox[T]) -> None:
-        msg = await mailbox.next()
-        self._future.set_result(msg)
+    async def actor_run(self) -> None:
+        async for (msg,) in self.mailbox:
+            self._future.set_result(msg)
+            return
 
     async def result(self) -> T:
         return await self._future

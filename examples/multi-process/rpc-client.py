@@ -4,16 +4,7 @@ from typing import Never
 
 from anyio import sleep
 
-from actorium import (
-    BehaviorActor,
-    BehaviorRef,
-    Mailbox,
-    SimpleActor,
-    lookup,
-    rpc,
-    run,
-    spawn,
-)
+from actorium import BehaviorActor, BehaviorRef, SimpleActor, lookup, rpc, run, spawn
 from actorium.transports import TcpClient
 
 
@@ -31,13 +22,13 @@ class Calculator(BehaviorActor):
 
 
 class Main(SimpleActor[Never]):
-    async def run(self, mailbox: Mailbox[Never]) -> None:
+    async def actor_run(self) -> None:
         spawn(TcpClient, "localhost", 9000)
 
         for i in range(100):
             try:
                 calc = await lookup("calc", BehaviorRef[Calculator], timeout=1)
-                result = await calc.rpc.double_it(10, timeout=1)
+                result = await calc.double_it(10, timeout=1)
 
                 print("got result", result)
                 await sleep(0.3)

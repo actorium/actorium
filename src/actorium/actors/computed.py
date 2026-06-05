@@ -1,12 +1,12 @@
 from collections.abc import Callable
 from inspect import signature
-from typing import TYPE_CHECKING, Any, Self, Union, final
+from typing import TYPE_CHECKING, Any, Union, final
 
 from typemap_extensions import Iter
 
 from actorium.system import spawn
 
-from .behaviors import BehaviorActor, BehaviorRef, behavior
+from .behaviors import BehaviorActor, behavior
 from .signals import Signal, SignalRef, SignalSubscribeWithId, Undefined
 
 __all__ = [
@@ -80,9 +80,10 @@ class _Observer[*T, V](BehaviorActor):
 
         self._values: list[Union[*T] | _Unknown] = [_Unknown() for _ in self._reactives]
 
-    async def actor_init(self, ref: BehaviorRef[Self]) -> None:
+    async def actor_init(self) -> None:
         for i, reactive in enumerate(self._reactives):
-            spawn(SignalSubscribeWithId, reactive, ref, i)
+            # typing: `Union[*T]` instead of `Any`.
+            spawn(SignalSubscribeWithId[Any], reactive, self.actor_ref().changed, i)
 
     @behavior
     # async def changed(self, id: int, value: Union[*T]) -> None:

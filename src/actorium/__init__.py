@@ -1,4 +1,4 @@
-from .actor import ActorFactory, AnyRef, BaseActor, RawMailbox, SerializedMessage
+from .actor import ActorFactory, BaseActor, RawMailbox, SerializedMessage
 from .actors import (
     BehaviorActor,
     BehaviorRef,
@@ -13,7 +13,6 @@ from .types import ActorAddress, ActorId, SystemId
 
 __all__ = [
     # Actor.
-    "AnyRef",
     "RawMailbox",
     "BaseActor",
     "ActorFactory",

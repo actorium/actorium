@@ -1,5 +1,6 @@
 from ipaddress import IPv4Address
 from logging import getLogger
+from typing import Never
 
 from anyio import (
     BrokenResourceError,
@@ -14,7 +15,7 @@ from anyio.abc import SocketStream
 from anyio.streams.memory import MemoryObjectSendStream
 from pydantic import TypeAdapter
 
-from actorium.actors import Mailbox, SimpleActor
+from actorium.actors import SimpleActor
 from actorium.system import GatewayMessage, connect_gateway
 
 from ._line_protocol import LineReceiver
@@ -32,7 +33,7 @@ _adapter: TypeAdapter[GatewayMessage] = TypeAdapter(GatewayMessage)
 _logger = getLogger(__name__)
 
 
-class TcpServer(SimpleActor[None]):
+class TcpServer(SimpleActor[Never]):
     """
     Actor that listens on the given host/port and accepts connections from
     another actor system through a `TcpClient`.
@@ -42,7 +43,7 @@ class TcpServer(SimpleActor[None]):
         self.host = host
         self.port = port
 
-    async def run(self, mailbox: Mailbox[None]) -> None:
+    async def actor_run(self) -> None:
         backoff = 0.5
         while True:
             try:
@@ -70,12 +71,12 @@ class TcpServer(SimpleActor[None]):
         await handle_tcp_connection(client)
 
 
-class TcpClient(SimpleActor[None]):
+class TcpClient(SimpleActor[Never]):
     def __init__(self, host: Host, port: int) -> None:
         self.host = host
         self.port = port
 
-    async def run(self, mailbox: Mailbox[None]) -> None:
+    async def actor_run(self) -> None:
         backoff_seconds = 0.5
         while True:
             try:

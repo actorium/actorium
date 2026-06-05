@@ -3,7 +3,7 @@ from typing import Never
 
 from anyio import sleep
 
-from .simple import Mailbox, SimpleActor
+from .simple import SimpleActor
 
 __all__ = [
     "CallAfterTimeout",
@@ -23,6 +23,6 @@ class CallAfterTimeout(SimpleActor[Never]):
         self._seconds = seconds
         self._func = func
 
-    async def run(self, mailbox: Mailbox[Never]) -> None:
+    async def actor_run(self) -> None:
         await sleep(self._seconds)
         self._func()

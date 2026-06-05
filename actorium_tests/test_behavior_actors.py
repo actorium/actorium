@@ -1,4 +1,4 @@
-from actorium import BehaviorActor, Mailbox, SimpleActor, rpc, run, spawn
+from actorium import BehaviorActor, SimpleActor, rpc, run, spawn
 
 
 def test_behavior_actors() -> None:
@@ -14,14 +14,14 @@ def test_behavior_actors() -> None:
             return value + 1
 
     class Main(SimpleActor[None]):
-        async def run(self, mailbox: Mailbox[None]) -> None:
+        async def actor_run(self) -> None:
             nonlocal did_run
 
             ref = spawn(Calc)
-            result = await ref.rpc.double_it(4)
+            result = await ref.double_it(4)
             assert result == 8
 
-            result = await ref.rpc.plus_one(4)
+            result = await ref.plus_one(4)
             assert result == 5
             did_run = True
 
@@ -40,11 +40,11 @@ def test_behavior_multiple_arguments() -> None:
             return a + b
 
     class Main(SimpleActor[None]):
-        async def run(self, mailbox: Mailbox[None]) -> None:
+        async def actor_run(self) -> None:
             nonlocal did_run
 
             ref = spawn(Calc)
-            result = await ref.rpc.sum(1, 2)
+            result = await ref.sum(1, 2)
             assert result == 3
 
             did_run = True

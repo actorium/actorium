@@ -3,7 +3,7 @@ from threading import Thread
 
 from pydantic import BaseModel
 
-from actorium import Mailbox, SimpleActor, SimpleRef, lookup, run, spawn
+from actorium import SimpleActor, SimpleRef, lookup, run, spawn
 from actorium.actors import Signal, SignalRef
 
 from .utils import assert_soon_equal
@@ -13,12 +13,12 @@ def test_actors() -> None:
     items: list[int] = []
 
     class Collector(SimpleActor[int]):
-        async def run(self, mailbox: Mailbox[int]) -> None:
-            async for msg in mailbox:
+        async def actor_run(self) -> None:
+            async for (msg,) in self.mailbox:
                 items.append(msg)
 
     class Main(SimpleActor[None]):
-        async def run(self, mailbox: Mailbox[None]) -> None:
+        async def actor_run(self) -> None:
             ref = spawn(Collector)
 
             ref.tell(1)
@@ -41,12 +41,12 @@ def _skip_test_actor_registry() -> None:
             def __init__(self, items: list[int]) -> None:
                 self.items = items
 
-            async def run(self, mailbox: Mailbox[int]) -> None:
-                async for msg in mailbox:
+            async def actor_run(self) -> None:
+                async for (msg,) in self.mailbox:
                     self.items.append(msg)
 
         class Thread1(SimpleActor[None]):
-            async def run(self, mailbox: Mailbox[None]) -> None:
+            async def actor_run(self) -> None:
                 _ref = spawn(Receiver, received_items, name="our-actor")
                 ready.set()
                 await assert_soon_equal(lambda: received_items, [1, 2, 3])
@@ -56,7 +56,7 @@ def _skip_test_actor_registry() -> None:
 
     def thread_2() -> None:
         class Thread2(SimpleActor[None]):
-            async def run(self, mailbox: Mailbox[None]) -> None:
+            async def actor_run(self) -> None:
                 ready.wait()
 
                 collector = await lookup("our-actor", SimpleRef[int], timeout=1)
@@ -87,17 +87,17 @@ def test_send_actor_to_actor() -> None:
     items: list[int] = []
 
     class EchoActor(SimpleActor[EchoMsg]):
-        async def run(self, mailbox: Mailbox[EchoMsg]) -> None:
-            async for msg in mailbox:
+        async def actor_run(self) -> None:
+            async for (msg,) in self.mailbox:
                 msg.reply_to.tell(msg.value)
 
     class Receiver(SimpleActor[int]):
-        async def run(self, mailbox: Mailbox[int]) -> None:
-            async for msg in mailbox:
+        async def actor_run(self) -> None:
+            async for (msg,) in self.mailbox:
                 items.append(msg)
 
     class Main(SimpleActor[None]):
-        async def run(self, mailbox: Mailbox[None]) -> None:
+        async def actor_run(self) -> None:
             echo_ref = spawn(EchoActor)
             receiver_ref = spawn(Receiver)
 
@@ -113,7 +113,7 @@ def test_send_actor_to_actor() -> None:
 
 def test_ref_with_registration() -> None:
     class Main(SimpleActor[None]):
-        async def run(self, mailbox: Mailbox[None]) -> None:
+        async def actor_run(self) -> None:
             number = spawn(Signal[int], 10, name="our-actor")
 
             assert await number.get() == 10

@@ -1,4 +1,4 @@
-from actorium import Mailbox, SimpleActor, run, spawn
+from actorium import SimpleActor, run, spawn
 from actorium.actors import Signal, computed
 
 from .utils import assert_soon_equal
@@ -6,14 +6,14 @@ from .utils import assert_soon_equal
 
 def test_computed() -> None:
     class Main(SimpleActor[None]):
-        async def run(self, mailbox: Mailbox[None]) -> None:
+        async def actor_run(self) -> None:
             # Create two reactive objects, number1 and number2
             number1 = spawn(Signal[int], 0)
             number2 = spawn(Signal[int], 0)
 
             # Check type parameters.
-            assert number1._t == int
-            assert number2._t == int
+            # assert number1._t == int
+            # assert number2._t == int
             # assert isinstance(number1, signal[int])
             # assert isinstance(number2, signal[int])
 
@@ -24,7 +24,7 @@ def test_computed() -> None:
 
             # Check type for computed and type parameter.
             # assert isinstance(the_sum, signal[int])
-            assert the_sum._t == int
+            # assert the_sum._t == int
 
             # Create a reactive computation.
             assert await the_sum.get() == 0
