@@ -7,6 +7,7 @@ More complex example of a generic `BehaviorActor`.
 from typing import Never, Protocol, Self
 
 from actorium import BehaviorActor, SimpleActor, rpc, run, spawn
+from actorium.utils import generic_class_getitem
 
 
 class SupportsMultiply(Protocol):
@@ -14,6 +15,8 @@ class SupportsMultiply(Protocol):
 
 
 class Calc[T: SupportsMultiply](BehaviorActor):
+    __class_getitem__ = generic_class_getitem
+
     @rpc
     async def double_it(self, value: T) -> T:
         return value * 2

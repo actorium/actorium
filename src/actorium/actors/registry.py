@@ -1,19 +1,16 @@
 from asyncio import Future, sleep
 from collections import defaultdict
-from functools import cache
-from typing import TYPE_CHECKING, Never, get_args
+from typing import Never
 
 from anyio import move_on_after
 
 from actorium.utils import TtlMap
 
-from ..system import spawn
 from .behaviors import BehaviorActor, BehaviorRef, behavior, rpc
 from .simple import SimpleActor
 
 __all__ = [
     "Registry",
-    "RegistryRef",
     "Registration",
 ]
 
@@ -40,11 +37,11 @@ class Registry[T](BehaviorActor):
         self._registered_data: TtlMap[str, T] = TtlMap()
         self._get_waiters: dict[str, set[Future[T]]] = defaultdict(set)
 
-    def actor_ref(self) -> RegistryRef[T]:
-        if not TYPE_CHECKING:
-            T = get_args(self.__orig_class__)[0]
-
-        return RegistryRef[T](**super().actor_ref().__dict__)
+    #    def actor_ref(self) -> RegistryRef[T]:
+    #        if not TYPE_CHECKING:
+    #            T = get_args(self.__orig_class__)[0]
+    #
+    #        return RegistryRef[T](**super().actor_ref().__dict__)
 
     @behavior
     def publish(self, name: str, value: T, ttl_seconds: float) -> None:
@@ -80,19 +77,21 @@ class Registry[T](BehaviorActor):
         return list(self._registered_data.keys())
 
 
-class RegistryRef[T](BehaviorRef[Registry[T]]):
-    @cache
-    @staticmethod
-    def __class_getitem__(item: type) -> type:
-        class _RegistryRef(RegistryRef):  # type: ignore
-            # Actor class that the behavior is pointing to.
-            _a = Registry[item]  # type: ignore
-            _t = item
+# class RegistryRef[T](BehaviorRef[Registry[T]]):
+#    @cache
+#    @staticmethod
+#    def __class_getitem__(item: type) -> type:
+#        class _RegistryRef(RegistryRef):  # type: ignore
+#            # Actor class that the behavior is pointing to.
+#            _a = Registry[item]  # type: ignore
+#            _t = item
+#
+#        return _RegistryRef
+#
+#    def register(self, name: str, value: T) -> None:
+#        spawn(Registration[T], self, name, value)
 
-        return _RegistryRef
-
-    def register(self, name: str, value: T) -> None:
-        spawn(Registration[T], self, name, value)
+type RegistryRef[T] = BehaviorRef[Registry[T]]
 
 
 class Registration[T](SimpleActor[Never]):
@@ -101,7 +100,9 @@ class Registration[T](SimpleActor[Never]):
     periodically.
     """
 
-    def __init__(self, registry_ref: RegistryRef[T], name: str, value: T) -> None:
+    def __init__(
+        self, registry_ref: BehaviorRef[Registry[T]], name: str, value: T
+    ) -> None:
         self.registry_ref = registry_ref
         self.name = name
         self.value = value

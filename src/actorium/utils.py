@@ -1,13 +1,17 @@
 import time
+from collections.abc import Sequence
 from functools import cache, wraps
-from types import FunctionType
-from typing import Any, Callable, Iterable, Protocol, TypeVar
+from types import FunctionType, GenericAlias
+from typing import Any, Callable, Iterable, Protocol, TypeVar, TypeVarTuple, get_origin
+
+from typing_extensions import TypeForm
 
 __all__ = [
     "TtlMap",
     "TtlSet",
     "GenericFunction",
     "generic_function",
+    "substitute_type",
 ]
 
 
@@ -155,3 +159,93 @@ def generic_function[*P, R](func: Callable[[*P], R]) -> GenericFunction[*P, R]:
 
     wrapper.__doc__ = func.__doc__
     return wrapper()
+
+
+@classmethod
+@cache
+def generic_class_getitem(cls, items: Any) -> type:
+    if not isinstance(items, tuple):
+        return cls[(items,)]
+
+    if "*" in repr(items):
+        breakpoint()
+
+    parameters = cls.__parameters__
+    all_items = items
+    _typevar_to_args: dict[TypeVar | TypeVarTuple, TypeForm] = {}
+
+    while parameters and isinstance(parameters[0], TypeVar):
+        _typevar_to_args[parameters[0]] = items[0]
+        parameters = parameters[1:]
+        items = items[1:]
+
+    while parameters and isinstance(parameters[-1], TypeVar):
+        _typevar_to_args[parameters[-1]] = items[-1]
+        parameters = parameters[:-1]
+        items = items[:-1]
+
+    if parameters:
+        assert len(parameters) == 1
+        assert isinstance(parameters[0], TypeVarTuple)
+        _typevar_to_args[parameters[0]] = items
+        items = ()
+
+    if items:
+        raise TypeError(f"Too many type parameters given for class {cls!r}")
+
+    return type(
+        f"{cls.__name__}[{', '.join(getattr(i, '__name__', repr(i)) for i in all_items)}]",
+        (cls,),
+        {
+            "_args": all_items,
+            "_typevar_to_args": _typevar_to_args,
+            "_generic_cls": cls,
+            "__module__": cls.__module__,
+        },
+    )
+
+
+def substitute_type(type_definition: TypeForm[Any], cls: type) -> TypeForm[Any]:
+    """
+    Resolve type annotation of a method/attribute of a generic class.
+    """
+    if not hasattr(cls, "_typevar_to_args"):
+        return type_definition
+
+    typevars = []
+    typevar_values = []
+    for t, v in cls._typevar_to_args.items():
+        typevars.append(t)
+        typevar_values.append(v)
+
+    return _substitute_type(type_definition, typevars, typevar_values)
+
+
+def _substitute_type(
+    type_definition: TypeForm[Any],
+    type_params: Sequence[TypeVar],
+    args: Sequence[type],
+) -> TypeForm[Any]:
+    if len(type_params) != len(args):
+        raise RuntimeError("Type parameters not specified for behavior actor.")
+
+    if isinstance(type_definition, TypeVar):
+        # Lookup.
+        for t, a in zip(type_params, args):
+            if type_definition == t:
+                return a
+        raise RuntimeError("Type parameter not found.")
+
+    if isinstance(type_definition, GenericAlias):
+        cls = get_origin(type_definition)
+        return cls[
+            *[_substitute_type(a, type_params, args) for a in type_definition.__args__]
+        ]
+
+    # If this is generic class.
+    if hasattr(type_definition, "_typevar_to_args"):
+        return type_definition._generic_cls[
+            *[_substitute_type(arg, type_params, args) for arg in type_definition._args]
+        ]
+
+    return type_definition

@@ -1,12 +1,16 @@
 from abc import abstractmethod
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, ClassVar, Never, Self
+from typing import TYPE_CHECKING, Self
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from logging import getLogger
+import msgspec
 from typing_extensions import TypeForm
 
-from actorium.actor import BaseActor, RawMailbox, SerializedMessage
+from actorium.actor import BaseActor, RawMailbox
+from actorium.logger import logger
+from actorium.serialization import deserialize, serialize
 from actorium.types import ActorAddress
+from actorium.utils import generic_class_getitem
 
 __all__ = [
     "SimpleActor",
@@ -25,30 +29,27 @@ class SimpleActor[*T](BaseActor):
     `TypeAdapter`.
     """
 
-    _t: ClassVar[TypeForm[tuple[*T]] | None] = None
-
-    # @cache
-    @classmethod
-    def __class_getitem__(cls, *items: TypeForm[tuple[*T]]) -> type:
-        class _SimpleActor(cls):  # type: ignore
-            _t = items
-
-        return _SimpleActor
+    __class_getitem__ = generic_class_getitem
 
     def actor_post_init(self, create_mailbox: Callable[[], RawMailbox]) -> None:
+        if not TYPE_CHECKING:
+            T = self._args
+
         self._raw_mailbox: RawMailbox = create_mailbox()
-        self.mailbox = Mailbox(
+        self.mailbox = Mailbox[*T](
             # Make sure that if `actor_ref` is overridden, that we take the
             # message type from there.
-            tuple[*self._t],  # type:ignore[name-defined]
+            tuple[*self._args],  # type:ignore[name-defined]
             self._raw_mailbox,
         )
 
     def actor_ref(self) -> SimpleRef[*T]:
-        if not TYPE_CHECKING:
-            T = self._t
+        address = self._raw_mailbox.address
 
-        return SimpleRef[*T](actor_address=self._raw_mailbox.address)
+        if not TYPE_CHECKING:
+            T = self._args
+
+        return SimpleRef[*T](actor_address=address)
 
     @abstractmethod
     async def actor_run(self) -> None:
@@ -60,6 +61,8 @@ class Mailbox[*T]:
     Mailbox for a single actor from where the actor can receive messages.
     """
 
+    __class_getitem__ = generic_class_getitem
+
     def __init__(
         self,
         message_type: TypeForm[tuple[*T]],
@@ -68,28 +71,30 @@ class Mailbox[*T]:
         self._message_type = message_type
         self._raw_mailbox = raw_mailbox
 
-        self._type_adapter: None | TypeAdapter[tuple[*T]] = None
-
-        if message_type != tuple[Never]:
-            self._type_adapter = TypeAdapter(message_type)
-
     def __aiter__(self) -> Self:
         return self
 
     async def __anext__(self) -> tuple[*T]:
-        if self._type_adapter is None:
-            raise TypeError("Can't receive messages in `SimpleActor[Never]`.")
+        if not TYPE_CHECKING:
+            T = self._args
 
-        message = await self._raw_mailbox.next()
+        while True:
+            message = await self._raw_mailbox.next()
 
-        if isinstance(message, SerializedMessage):
-            msg: tuple[*T] = self._type_adapter.validate_json(message.data)
-            return msg
+            try:
+                msg: tuple[*T] = deserialize(message, type=tuple[*T])
+            except msgspec.ValidationError:
+                logger.warning(
+                    "Cannot deserialize message in actor mailbox type=%s, message=%s",
+                    repr(tuple[*T]),
+                    repr(message[:10] + "..." if len(message) > 10 else message),
+                )
+                continue
+            else:
+                return msg
 
-        return self._type_adapter.validate_python(message)
 
-
-class SimpleRef[*T](BaseModel):
+class SimpleRef[*T]:
     """
     Reference/handle to an actor that has been spawned somewhere, possibly in
     another process.
@@ -98,28 +103,12 @@ class SimpleRef[*T](BaseModel):
     part of a message to any other actor.
     """
 
-    model_config = ConfigDict(frozen=True)
+    __class_getitem__ = generic_class_getitem
 
-    actor_address: ActorAddress
+    def __init__(self, actor_address: ActorAddress) -> None:
+        assert hasattr(self, "_args")
 
-    def model_post_init(self, __context: object) -> None:
-        if self.message_type() is Never:  # type: ignore
-            # `Never` means we can't receive messages.
-            return
-
-        try:
-            TypeAdapter(self.message_type())
-        except BaseException:
-            breakpoint()
-
-    @classmethod
-    def message_type(cls) -> type[Any]:
-        # NOTE: The return type is actually `type[T]`, but it doesn't matter in
-        #       this context. We want `SimpleRef[T]` to be covariant.
-        try:
-            return cls.__pydantic_generic_metadata__["args"][0]  # type:ignore
-        except IndexError:
-            return cls.__bases__[0].__pydantic_generic_metadata__["args"][0]  # type:ignore
+        self.actor_address = actor_address
 
     def tell(self, *message: *T) -> None:
         """
@@ -127,12 +116,8 @@ class SimpleRef[*T](BaseModel):
         """
         from actorium.system import _get_system
 
-        _get_system().call_actor_soon(self.actor_address, message, self._serialize)
+        serialized_message = serialize(message)
+        _get_system().call_actor_soon(self.actor_address, serialized_message)
 
     def __call__(self, *message: *T) -> None:
         self.tell(*message)
-
-    @classmethod
-    def _serialize(cls, message: tuple[*T]) -> SerializedMessage:
-        type_adapter: TypeAdapter[tuple[*T]] = TypeAdapter(cls.message_type())
-        return SerializedMessage(data=type_adapter.dump_json(message).decode())

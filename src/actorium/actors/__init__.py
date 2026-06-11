@@ -1,8 +1,9 @@
 from .behaviors import BehaviorActor, BehaviorRef, behavior, rpc
 from .computed import computed
 from .registry import Registration, Registry, RegistryRef
-from .signals import Signal, SignalRef, Undefined
+from .signals import Signal, SignalReader, SignalWriter, Undefined
 from .simple import Mailbox, SimpleActor, SimpleRef
+from .simple_rpc import RpcActor, RpcRef
 from .timers import CallAfterTimeout
 
 __all__ = [
@@ -10,6 +11,9 @@ __all__ = [
     "SimpleActor",
     "Mailbox",
     "SimpleRef",
+    # Rpc.
+    "RpcRef",
+    "RpcActor",
     # Behavior
     "BehaviorActor",
     "BehaviorRef",
@@ -17,7 +21,8 @@ __all__ = [
     "rpc",
     # signal
     "Signal",
-    "SignalRef",
+    "SignalReader",
+    "SignalWriter",
     "Undefined",
     # Computed.
     "computed",

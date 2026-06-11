@@ -1,6 +1,6 @@
 from typing import assert_type
 
-from .actors import BehaviorActor, SimpleActor, SimpleRef, behavior, rpc
+from .actors import BehaviorActor, BehaviorRef, SimpleActor, SimpleRef, behavior, rpc
 from .system import spawn
 
 __all__ = []
@@ -53,11 +53,33 @@ async def __test_behavior_actor_type_inference() -> None:
     class Main(SimpleActor[None]):
         async def actor_run(self) -> None:
             ref = spawn(Calc)
+            assert_type(ref, BehaviorRef[Calc])
 
-            ref.be.say_hello("Jonathan")
+            ref.say_hello("Jonathan")
 
             result = await ref.double_it(4)
             assert_type(result, int)
 
             result = await ref.is_even(4)
             assert_type(result, bool)
+
+
+async def __test_generic_behavior_actor_type_inference() -> None:
+    class Calc[T: int | str](BehaviorActor):
+        @behavior
+        def say_hello(self, value: T) -> None:
+            print(f"hello, {value}")
+
+        @rpc
+        async def return_value(self, value: T) -> T:
+            return value
+
+    class Main(SimpleActor[None]):
+        async def actor_run(self) -> None:
+            ref = spawn(Calc[int])
+            assert_type(ref, BehaviorRef[Calc[int]])
+
+            ref.say_hello(123)
+
+            result = await ref.return_value(4)
+            assert_type(result, int)

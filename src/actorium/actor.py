@@ -4,20 +4,15 @@ from collections.abc import Callable
 from typing import Protocol, Self
 
 from anyio import create_memory_object_stream
-from pydantic import BaseModel
 
-from actorium.types import ActorAddress
+from .serialization import SerializedData
+from .types import ActorAddress
 
 __all__ = [
     "RawMailbox",
     "BaseActor",
     "ActorFactory",
-    "SerializedMessage",
 ]
-
-
-class SerializedMessage(BaseModel):
-    data: str
 
 
 class RawMailbox:
@@ -27,20 +22,20 @@ class RawMailbox:
 
     def __init__(self, address: ActorAddress) -> None:
         self.address = address
-        self._sender, self._receiver = create_memory_object_stream[
-            object | SerializedMessage
-        ](math.inf)
+        self._sender, self._receiver = create_memory_object_stream[SerializedData](
+            math.inf
+        )
 
-    def feed(self, message: object | SerializedMessage) -> None:
-        self._sender.send_nowait(message)
+    def feed(self, serialized_message: SerializedData) -> None:
+        self._sender.send_nowait(serialized_message)
 
-    async def next(self) -> object | SerializedMessage:
+    async def next(self) -> SerializedData:
         return await self._receiver.receive()
 
     def __aiter__(self) -> Self:
         return self
 
-    async def __anext__(self) -> object | SerializedMessage:
+    async def __anext__(self) -> SerializedData:
         return await self.next()
 
 

@@ -1,5 +1,6 @@
-from dataclasses import dataclass
 from uuid import UUID
+
+from msgspec import Struct
 
 __all__ = [
     "ActorId",
@@ -12,7 +13,6 @@ type ActorId = UUID
 type SystemId = UUID
 
 
-@dataclass(frozen=True)
-class ActorAddress:
+class ActorAddress(Struct, frozen=True):
     actor_id: ActorId
     system_id: SystemId

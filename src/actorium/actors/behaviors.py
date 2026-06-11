@@ -1,5 +1,6 @@
 import inspect
 import typing
+from functools import cache
 from types import GenericAlias
 from typing import (
     TYPE_CHECKING,
@@ -7,17 +8,16 @@ from typing import (
     Callable,
     Coroutine,
     Self,
-    TypeVar,
     get_args,
-    get_origin,
     get_type_hints,
 )
 
 from anyio import create_task_group
-from pydantic import BaseModel
+from msgspec import Struct
 from typing_extensions import TypeForm
 
 from actorium.actor import BaseActor, RawMailbox
+from actorium.utils import generic_class_getitem, substitute_type
 
 from .simple import Mailbox, SimpleActor, SimpleRef
 from .simple_rpc import RpcMailbox, RpcMessage, RpcRef
@@ -36,11 +36,11 @@ class _BehaviorMethod[*I]:
 
         input_param_names = list(inspect.signature(func).parameters)[1:]
 
-        self.input_type: TypeForm[tuple[*I]] = tuple[  # type: ignore
-            *(func.__annotations__[name] for name in input_param_names)
+        self.input_types: list[TypeForm[Any]] = [
+            func.__annotations__[name] for name in input_param_names
         ]
 
-        # TODO: this is not accurate! We should test whether the last param is called
+        # TODO: this is not accurate! We should test whether the last param is called 'reply_to'.
         self.is_rpc_behavior = (
             len(input_param_names) > 0 and input_param_names[-1] == "reply_to"
         )
@@ -56,18 +56,10 @@ class _BehaviorMethod[*I]:
 
     # TODO: cache!!
 
-    def get_input_types(self, orig_class: type) -> TypeForm[tuple[Any, ...]]:
-        origin = get_origin(orig_class)
-
-        if origin is None:
-            if len(orig_class.__type_params__) > 0:
-                raise RuntimeError("Type parameters required but not given.")
-
-            return self.input_type
-
-        return _substitute_type(
-            self.input_type, origin.__type_params__, get_args(orig_class)
-        )
+    def get_input_types(self, orig_class: type) -> list[TypeForm[Any]]:
+        return [
+            substitute_type(input_type, orig_class) for input_type in self.input_types
+        ]
 
 
 class _RpcMethod[*I, O]:
@@ -78,8 +70,8 @@ class _RpcMethod[*I, O]:
 
         input_param_names = list(inspect.signature(func).parameters)[1:]
 
-        self.input_type: TypeForm[tuple[*I]] = tuple[  # type: ignore
-            *(func.__annotations__[name] for name in input_param_names)
+        self.input_types: list[TypeForm[Any]] = [
+            func.__annotations__[name] for name in input_param_names
         ]
         self.output_type: TypeForm[O] = get_type_hints(self._func)["return"]
 
@@ -94,44 +86,19 @@ class _RpcMethod[*I, O]:
 
     # TODO: cache!!
 
-    def get_rpc_message_type(
-        self, behavior_name: str, orig_class: type
-    ) -> type[RpcMessage[Any, Any]]:
-        return RpcMessage[  # type: ignore
-            self.get_input_types(orig_class), self.get_output_type(orig_class)
+    def get_input_types(self, orig_class: type) -> list[TypeForm[tuple[Any]]]:
+        return [
+            substitute_type(input_type, orig_class) for input_type in self.input_types
         ]
 
-    def get_input_types(self, orig_class: type) -> TypeForm[tuple[Any, ...]]:
-        origin = get_origin(orig_class)
-
-        if origin is None:
-            if len(orig_class.__type_params__) > 0:
-                raise RuntimeError("Type parameters required but not given.")
-
-            return self.input_type
-
-        return _substitute_type(
-            self.input_type, origin.__type_params__, get_args(orig_class)
-        )
-
     def get_output_type(self, orig_class: type) -> TypeForm[O]:
-        origin = get_origin(orig_class)
-
-        if origin is None:
-            if len(orig_class.__type_params__) > 0:
-                raise RuntimeError("Type parameters required but not given.")
-
-            return self.output_type
-
-        return _substitute_type(
-            self.output_type, origin.__type_params__, get_args(orig_class)
-        )
+        return substitute_type(self.output_type, orig_class)
 
 
 def behavior[*I](method: Callable[[Any, *I], None]) -> _BehaviorMethod[*I]:
     """
     Decorator for annotating methods of a `BehaviorActor`, exposing them
-    publicly as an RPC method of the actor.
+    publicly as a behavior method of the actor.
     """
     return _BehaviorMethod(method)
 
@@ -150,7 +117,7 @@ class BehaviorActor(BaseActor):
     Actor implementation that works by defining multiple `@behavior` or `@rpc`
     decorated methods. Those behaviors and RPC methods can be called from the
     `BehaviorRef` proxy. The difference between a "behavior" and "rpc" is that
-    a "behavior" is fire-and-forget", while for "rpc" we can return a value.
+    a "behavior" is fire-and-forget, while for "rpc" we can return a value.
 
     E.g.::
 
@@ -173,14 +140,13 @@ class BehaviorActor(BaseActor):
         result = await ref.rpc.double_it(4)
     """
 
+    # Better support for generic behavior actors:
+    __class_getitem__ = generic_class_getitem
+
     def actor_post_init(self, create_mailbox: Callable[[], RawMailbox]) -> None:
-        # Create on mailbox for each 'behavior'.
+        # Create one mailbox for each 'behavior'.
         behavior_methods = get_behaviors_from_class(self.__class__)
         rpc_methods = get_rpc_methods_from_class(self.__class__)
-
-        orig_class = (
-            self.__orig_class__ if hasattr(self, "__orig_class__") else self.__class__
-        )
 
         behavior_mailboxes = {}
         rpc_mailboxes = {}
@@ -188,16 +154,21 @@ class BehaviorActor(BaseActor):
         rpc_addresses = {}
 
         for name, be_method in behavior_methods.items():
-            type_ = be_method.get_input_types(orig_class)
+            types = be_method.get_input_types(self.__class__)
             raw_mailbox = create_mailbox()
-            behavior_mailbox = Mailbox(type_, raw_mailbox)
+            behavior_mailbox = Mailbox[*types](tuple[*types], raw_mailbox)  # type:ignore[valid-type]
             behavior_mailboxes[name] = behavior_mailbox
             behavior_addresses[name] = raw_mailbox.address
 
         for name, rpc_method in rpc_methods.items():
+            in_types = rpc_method.get_input_types(self.__class__)
+            out_type = rpc_method.get_output_type(self.__class__)
+
             raw_mailbox = create_mailbox()
-            rpc_type = rpc_method.get_rpc_message_type(name, orig_class)
-            rpc_mailbox = RpcMailbox(rpc_type, raw_mailbox)
+            rpc_mailbox = RpcMailbox[tuple[*in_types], out_type](  # type:ignore[valid-type]
+                RpcMessage[tuple[*in_types], out_type],  # type:ignore[valid-type]
+                raw_mailbox,
+            )
             rpc_mailboxes[name] = rpc_mailbox
             rpc_addresses[name] = raw_mailbox.address
 
@@ -214,9 +185,7 @@ class BehaviorActor(BaseActor):
                 Self = type(self)
 
         fields = {}
-        orig_actor_cls = (
-            self.__orig_class__ if hasattr(self, "__orig_class__") else self.__class__
-        )
+        orig_actor_cls = self.__class__
 
         for name, be_method in get_behaviors_from_class(self.__class__).items():
             fields[name] = SimpleRef[*be_method.get_input_types(orig_actor_cls)](  # type: ignore
@@ -225,7 +194,7 @@ class BehaviorActor(BaseActor):
 
         for name, rpc_method in get_rpc_methods_from_class(self.__class__).items():
             fields[name] = RpcRef[  # type: ignore[misc,operator]
-                *rpc_method.get_input_types(orig_actor_cls),  # type:ignore[misc]
+                *rpc_method.get_input_types(orig_actor_cls),
                 rpc_method.get_output_type(orig_actor_cls),
             ](
                 actor_address=self._rpc_addresses[name],
@@ -361,6 +330,8 @@ if TYPE_CHECKING:
 else:
 
     class BehaviorRef[A: BehaviorActor]:
+        @classmethod
+        @cache
         def __class_getitem__(cls, behavior_actor: type[A]) -> type[BehaviorRef[A]]:
             actor = behavior_actor
             annotations = {}
@@ -382,30 +353,4 @@ else:
             else:
                 name = f"BehaviorRef[{actor.__name__}[{get_args(actor)}]]"
 
-            return type(name, (BaseModel,), fields)
-
-
-def _substitute_type(
-    type_definition: TypeForm[Any],
-    type_params: tuple[TypeVar, ...],
-    args: tuple[type, ...],
-) -> TypeForm[Any]:
-    if len(type_params) != len(args):
-        raise RuntimeError("Type parameters not specified for behavior actor.")
-
-    if isinstance(type_definition, TypeVar):
-        # Lookup.
-        for t, a in zip(type_params, args):
-            if type_definition == t:
-                return a
-        raise RuntimeError("Type parameter not found.")
-
-    if isinstance(type_definition, GenericAlias):
-        cls = get_origin(type_definition)
-        return cls[
-            *[_substitute_type(a, type_params, args) for a in type_definition.__args__]
-        ]
-
-    # TODO: recurse into other container types!
-
-    return type_definition
+            return type(name, (Struct,), fields)

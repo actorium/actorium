@@ -7,7 +7,8 @@ from typemap_extensions import Iter
 from actorium.system import spawn
 
 from .behaviors import BehaviorActor, behavior
-from .signals import Signal, SignalRef, SignalSubscribeWithId, Undefined
+from .signals import Signal, SignalReader, SignalSubscribeWithId, Undefined
+from .simple import SimpleRef
 
 __all__ = [
     "computed",
@@ -20,9 +21,9 @@ class _Unknown:
 
 
 def computed[*T, V](
-    *reactives: *[SignalRef[t] for t in Iter[tuple[*T]]],
+    *reactives: *[SignalReader[t] for t in Iter[tuple[*T]]],
     name: str | None = None,
-) -> Callable[[Callable[[*T], V]], SignalRef[V]]:
+) -> Callable[[Callable[[*T], V]], SignalReader[V]]:
     """
     Decorator for producing a new reactive `signal` based on the given signals
     by applying the decorated function on the input signals whenever any value
@@ -43,18 +44,18 @@ def computed[*T, V](
     needed.
     """
 
-    def decorator(func: Callable[[*T], V]) -> SignalRef[V]:
+    def decorator(func: Callable[[*T], V]) -> SignalReader[V]:
         sig = signature(func)
 
         if not TYPE_CHECKING:
             V = sig.return_annotation
 
-        result = spawn(Signal[V], Undefined, name=name)
+        result, set_result = spawn(Signal[V], Undefined, name=name)
 
         # Spawn observer actor that calls the given func when we receive
         # updates.
         if not TYPE_CHECKING:  # mypy crashes on the following line.
-            spawn(_Observer[*T, V], func, result, *reactives)
+            spawn(_Observer[*T, V], func, set_result, *reactives)
 
         return result
 
@@ -71,11 +72,11 @@ class _Observer[*T, V](BehaviorActor):
     def __init__(
         self,
         func: Callable[[*T], V],
-        result: SignalRef[V],
-        *reactives: *[SignalRef[t] for t in Iter[tuple[*T]]],
+        set_result: SimpleRef[V],
+        *reactives: *[SignalReader[t] for t in Iter[tuple[*T]]],
     ) -> None:
         self._func = func
-        self._result = result
+        self._set_result = set_result
         self._reactives = reactives
 
         self._values: list[Union[*T] | _Unknown] = [_Unknown() for _ in self._reactives]
@@ -95,4 +96,4 @@ class _Observer[*T, V](BehaviorActor):
             return
 
         new_value = self._func(*self._values)  # type: ignore
-        self._result.set(new_value)
+        self._set_result(new_value)

@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable
 from typing import Type as TypingType
 
-from mypy.nodes import ARG_OPT, Decorator, TypeInfo
+from mypy.nodes import Decorator, TypeInfo
 from mypy.plugin import AttributeContext, Plugin
 from mypy.types import AnyType, CallableType, Instance, Type, TypeOfAny, get_proper_type
 
@@ -19,52 +19,157 @@ class ActoriumPlugin(Plugin):
 
     def get_function_hook(self, fullname: str) -> Callable[[Any], Type] | None:
         """Hook into function calls"""
-        if fullname in ("actorium.spawn", "actorium.system.spawn"):
+        # Hook into spawn function
+        if fullname == "actorium.system.spawn":
             return self._spawn_hook
+        return None
+
+    def get_method_hook(self, fullname: str) -> Callable[[Any], Type] | None:
+        """Hook into method calls"""
+        # Hook into any actor_ref method call - we'll check if it's a BehaviorActor in the hook
+        if fullname.endswith(".actor_ref"):
+            return self._actor_ref_hook
         return None
 
     def _spawn_hook(self, ctx: Any) -> Type:
         """
         Provide return type for spawn() calls.
 
-        spawn(SomeActor, ...) should return the type returned by SomeActor.actor_ref()
+        spawn(ActorClass) should return the type that ActorClass.actor_ref() returns.
         """
         from mypy.plugin import FunctionContext
 
         if not isinstance(ctx, FunctionContext):
             return ctx.default_return_type  # type: ignore[no-any-return]
 
-        # Get the first argument (the actor class)
+        # Get the first argument to spawn (the actor factory/class)
         if not ctx.args or not ctx.args[0]:
             return ctx.default_return_type
 
-        actor_arg = ctx.args[0][0]  # First argument, first element
-        actor_type = ctx.api.get_expression_type(actor_arg)
-        actor_type = get_proper_type(actor_type)
+        arg_expr = ctx.args[0][0]
 
-        # If it's a callable (class), get the return type (the instance type)
-        if isinstance(actor_type, CallableType):
-            instance_type = get_proper_type(actor_type.ret_type)
+        # Try to get the TypeInfo of the actor class
+        type_info = None
+        instance_type = None
 
-            if isinstance(instance_type, Instance):
-                # Check if this is a BehaviorActor subclass
-                for base in instance_type.type.mro:
-                    if base.fullname == "actorium.actors.behaviors.BehaviorActor":
-                        # This is a BehaviorActor, so spawn returns BehaviorRef[InstanceType]
-                        # Get BehaviorRef TypeInfo from the module
-                        try:
-                            module = ctx.api.modules.get("actorium.actors.behaviors")  # type: ignore[attr-defined]
-                            if module:
-                                behavior_ref_sym = module.names.get("BehaviorRef")
-                                if behavior_ref_sym and isinstance(
-                                    behavior_ref_sym.node, TypeInfo
-                                ):
-                                    return Instance(
-                                        behavior_ref_sym.node, [instance_type]
-                                    )
-                        except Exception:
-                            pass
-                        break
+        # First, try to get the type from arg_types (works for both generic and non-generic)
+        arg_type = get_proper_type(ctx.arg_types[0][0])
+        if isinstance(arg_type, CallableType):
+            # It's a constructor, get the return type
+            ret_type = get_proper_type(arg_type.ret_type)
+            if isinstance(ret_type, Instance):
+                type_info = ret_type.type
+                instance_type = ret_type
+
+        # Fallback: try to get from the expression node
+        if not type_info and hasattr(arg_expr, "node"):
+            if isinstance(arg_expr.node, TypeInfo):
+                type_info = arg_expr.node
+                instance_type = Instance(type_info, [])
+            elif hasattr(arg_expr.node, "type") and isinstance(
+                arg_expr.node.type, TypeInfo
+            ):
+                type_info = arg_expr.node.type
+                instance_type = Instance(type_info, [])
+
+        if not type_info:
+            return ctx.default_return_type
+
+        # Check if this is a BehaviorActor subclass
+        is_behavior_actor = any(
+            base.fullname == "actorium.actors.behaviors.BehaviorActor"
+            for base in type_info.mro
+        )
+
+        if not is_behavior_actor:
+            return ctx.default_return_type
+
+        # For BehaviorActor, we know actor_ref returns BehaviorRef[Self]
+        # So we'll construct this type directly
+
+        # Get BehaviorRef TypeInfo
+        try:
+            module = ctx.api.modules.get("actorium.actors.behaviors")  # type: ignore[attr-defined]
+            if not module:
+                return ctx.default_return_type
+
+            behavior_ref_sym = module.names.get("BehaviorRef")
+            if not behavior_ref_sym or not isinstance(behavior_ref_sym.node, TypeInfo):
+                return ctx.default_return_type
+
+            # Use the instance_type we determined earlier (which includes type arguments for generics)
+            if not instance_type:
+                instance_type = Instance(type_info, [])
+
+            # Return BehaviorRef[instance_type]
+            result = Instance(behavior_ref_sym.node, [instance_type])
+            return result
+        except Exception:
+            return ctx.default_return_type
+
+    def _substitute_self_in_type(
+        self, typ: Type, self_type: Instance, type_info: TypeInfo
+    ) -> Type:
+        """
+        Substitute Self in a type with the actual self type.
+
+        For BehaviorRef[Self], this becomes BehaviorRef[ActualClass].
+        """
+        from mypy.types import TypeVarType
+
+        typ = get_proper_type(typ)
+
+        if isinstance(typ, TypeVarType) and typ.name == "Self":
+            return self_type
+
+        if isinstance(typ, Instance):
+            # Recursively substitute in type arguments
+            new_args = []
+            for arg in typ.args:
+                new_args.append(
+                    self._substitute_self_in_type(arg, self_type, type_info)
+                )
+            return Instance(typ.type, new_args)
+
+        return typ
+
+    def _actor_ref_hook(self, ctx: Any) -> Type:
+        """
+        Provide return type for BehaviorActor.actor_ref() calls.
+
+        actor.actor_ref() should return BehaviorRef[type(actor)]
+        """
+        from mypy.plugin import MethodContext
+
+        if not isinstance(ctx, MethodContext):
+            return ctx.default_return_type  # type: ignore[no-any-return]
+
+        # Get the type of 'self' (the actor instance)
+        self_type = get_proper_type(ctx.type)
+
+        if not isinstance(self_type, Instance):
+            return ctx.default_return_type
+
+        # Check if this is a BehaviorActor subclass
+        is_behavior_actor = False
+        for base in self_type.type.mro:
+            if base.fullname == "actorium.actors.behaviors.BehaviorActor":
+                is_behavior_actor = True
+                break
+
+        if not is_behavior_actor:
+            return ctx.default_return_type
+
+        # Get BehaviorRef TypeInfo
+        try:
+            module = ctx.api.modules.get("actorium.actors.behaviors")  # type: ignore[attr-defined]
+            if module:
+                behavior_ref_sym = module.names.get("BehaviorRef")
+                if behavior_ref_sym and isinstance(behavior_ref_sym.node, TypeInfo):
+                    # Return BehaviorRef[SelfType]
+                    return Instance(behavior_ref_sym.node, [self_type])
+        except Exception:
+            pass
 
         return ctx.default_return_type
 
@@ -271,75 +376,76 @@ class ActoriumPlugin(Plugin):
 
     def _create_simple_ref_type(
         self, original_type: CallableType, api: Any
-    ) -> CallableType | None:
+    ) -> Type | None:
         """
-        Create the callable type for SimpleRef.
+        Create the type for SimpleRef.
 
-        SimpleRef[*T] has __call__(*message: *T) -> None
-        We strip 'self' and make it return None (fire-and-forget).
+        SimpleRef[*T] represents a reference to a behavior method that takes (*T) as arguments.
         """
         try:
             # Remove 'self' from argument list
             arg_types = list(original_type.arg_types[1:])
-            arg_kinds = list(original_type.arg_kinds[1:])
-            arg_names = list(original_type.arg_names[1:])
 
-            # Return type is None for behaviors (fire-and-forget)
-            from mypy.types import NoneType
+            # Get SimpleRef TypeInfo
+            try:
+                module = api.modules.get("actorium.actors.simple")
+                if not module:
+                    return None
+                simple_ref_sym = module.names.get("SimpleRef")
+                if simple_ref_sym and isinstance(simple_ref_sym.node, TypeInfo):
+                    # Return SimpleRef[*arg_types]
+                    return Instance(simple_ref_sym.node, arg_types)
+            except Exception:
+                pass
 
-            ret_type = NoneType()
-
-            return CallableType(
-                arg_types=arg_types,
-                arg_kinds=arg_kinds,
-                arg_names=arg_names,
-                ret_type=ret_type,
-                fallback=original_type.fallback,
-                name=original_type.name,
-            )
+            return None
         except Exception:
             return None
 
     def _create_rpc_ref_type(
         self, original_type: CallableType, api: Any
-    ) -> CallableType | None:
+    ) -> Type | None:
         """
-        Create the callable type for RpcRef.
+        Create the type for RpcRef.
 
-        RpcRef[*I, O] has async __call__(*inputs: *I, timeout: float | None = None) -> O
-        We strip 'self' and add the timeout parameter.
+        RpcRef[*I, O] represents a reference to an RPC method that takes (*I) as inputs
+        and returns O.
+
+        Note: The original method is async and returns Coroutine[Any, Any, O], but
+        RpcRef's __call__ unwraps this to just O.
         """
         try:
             # Remove 'self' from argument list
             arg_types = list(original_type.arg_types[1:])
-            arg_kinds = list(original_type.arg_kinds[1:])
-            arg_names = list(original_type.arg_names[1:])
 
-            # Add optional timeout parameter
-            from mypy.types import NoneType, UnionType
-
-            timeout_type: Type
-            try:
-                float_type = api.named_type("builtins.float")
-                timeout_type = UnionType([float_type, NoneType()])
-            except Exception:
-                timeout_type = AnyType(TypeOfAny.special_form)
-
-            arg_types.append(timeout_type)
-            arg_kinds.append(ARG_OPT)
-            arg_names.append("timeout")
-
-            # Keep the original return type (the RPC method's return type)
+            # Get the return type and unwrap Coroutine if needed
             ret_type = original_type.ret_type
 
-            return CallableType(
-                arg_types=arg_types,
-                arg_kinds=arg_kinds,
-                arg_names=arg_names,
-                ret_type=ret_type,
-                fallback=original_type.fallback,
-                name=original_type.name,
-            )
+            # If it's a coroutine, extract the actual return type
+            ret_type = get_proper_type(ret_type)
+            if isinstance(ret_type, Instance) and ret_type.type.fullname in (
+                "typing.Coroutine",
+                "collections.abc.Coroutine",
+                "typing.Awaitable",
+                "collections.abc.Awaitable",
+            ):
+                # For Coroutine[T, U, V] or Awaitable[V], the last type arg is the result
+                if ret_type.args:
+                    ret_type = ret_type.args[-1]
+
+            # Get RpcRef TypeInfo
+            try:
+                module = api.modules.get("actorium.actors.simple_rpc")
+                if not module:
+                    return None
+                rpc_ref_sym = module.names.get("RpcRef")
+                if rpc_ref_sym and isinstance(rpc_ref_sym.node, TypeInfo):
+                    # Return RpcRef[*arg_types, ret_type]
+                    return Instance(rpc_ref_sym.node, [*arg_types, ret_type])
+            except Exception:
+                pass
+
+            return None
         except Exception:
             return None
 

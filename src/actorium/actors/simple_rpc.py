@@ -1,14 +1,15 @@
 from abc import abstractmethod
 from collections.abc import Callable
-from functools import cache
-from typing import TYPE_CHECKING, Any, ClassVar, Never, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from anyio import fail_after
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from msgspec import Struct
 from typing_extensions import TypeForm
 
-from actorium.actor import BaseActor, RawMailbox, SerializedMessage
+from actorium.actor import BaseActor, RawMailbox
+from actorium.serialization import deserialize, serialize
 from actorium.types import ActorAddress
+from actorium.utils import generic_class_getitem
 
 from .future import Future
 from .simple import SimpleRef
@@ -20,7 +21,7 @@ __all__ = [
 ]
 
 
-class RpcMessage[I: tuple[Any, ...], O](BaseModel):
+class RpcMessage[I: tuple[Any, ...], O](Struct):
     """
     Message type sent from `BehaviorRef` to `BehaviorActor`.
     """
@@ -42,22 +43,12 @@ class RpcActor[*I, O](BaseActor):
     `TypeAdapter`.
     """
 
-    _i: ClassVar[TypeForm[tuple[*I] | None]] = None
-    _o: ClassVar[TypeForm[O | None]] = None
-
-    @cache
-    @staticmethod
-    def __class_getitem__(*items: TypeForm[Any]) -> type:
-        class _RpcActor(RpcActor):  # type: ignore
-            _i = items[:-1]  # type: ignore
-            _o = items[-1]
-
-        return _RpcActor
+    __class_getitem__ = generic_class_getitem
 
     def actor_post_init(self, create_mailbox: Callable[[], RawMailbox]) -> None:
         if not TYPE_CHECKING:
-            I = self._i
-            O = self._o
+            I = self._args[:-1]
+            O = self._args[-1]
 
         self._raw_mailbox: RawMailbox = create_mailbox()
         self.mailbox = RpcMailbox[tuple[*I], O](
@@ -69,8 +60,8 @@ class RpcActor[*I, O](BaseActor):
 
     def actor_ref(self) -> RpcRef[*I, O]:
         if not TYPE_CHECKING:
-            I = self._i
-            O = self._o
+            I = self._args[:-1]
+            O = self._args[-1]
 
         return RpcRef[*I, O](actor_address=self._raw_mailbox.address)
 
@@ -84,29 +75,32 @@ class RpcMailbox[I: tuple[Any, ...], O]:
     Mailbox for a single actor from where the actor can receive messages.
     """
 
+    __class_getitem__ = generic_class_getitem
+
     def __init__(
         self,
         message_type: TypeForm[RpcMessage[I, O]],
         raw_mailbox: RawMailbox,
     ) -> None:
+        assert hasattr(self, "_args")
         self._message_type = message_type
         self._raw_mailbox = raw_mailbox
-        self._type_adapter: TypeAdapter[RpcMessage[I, O]] = TypeAdapter(message_type)
 
     def __aiter__(self) -> Self:
         return self
 
     async def __anext__(self) -> RpcMessage[I, O]:
+        if not TYPE_CHECKING:
+            I = self._args[0]
+            O = self._args[1]
+
         message = await self._raw_mailbox.next()
 
-        if isinstance(message, SerializedMessage):
-            msg: RpcMessage[I, O] = self._type_adapter.validate_json(message.data)
-            return msg
-
-        return self._type_adapter.validate_python(message)
+        msg: RpcMessage[I, O] = deserialize(message, type=RpcMessage[I, O])
+        return msg
 
 
-class RpcRef[*I, O](BaseModel):
+class RpcRef[*I, O]:
     """
     Reference/handle to an actor that has been spawned somewhere, possibly in
     another process.
@@ -115,51 +109,27 @@ class RpcRef[*I, O](BaseModel):
     part of a message to any other actor.
     """
 
-    model_config = ConfigDict(frozen=True)
+    __class_getitem__ = generic_class_getitem
 
-    actor_address: ActorAddress
+    def __init__(self, actor_address: ActorAddress) -> None:
+        assert hasattr(self, "_args")
 
-    def model_post_init(self, __context: object) -> None:
-        if self.message_type() is Never:  # type: ignore
-            # `Never` means we can't receive messages.
-            return
-
-        try:
-            TypeAdapter(self.message_type())
-        except BaseException:
-            breakpoint()
-
-    @classmethod
-    def message_type(cls) -> type[Any]:
-        # NOTE: The return type is actually `type[T]`, but it doesn't matter in
-        #       this context. We want `SimpleRef[T]` to be covariant.
-        try:
-            return cls.__pydantic_generic_metadata__["args"][0]  # type:ignore
-        except IndexError:
-            return cls.__bases__[0].__pydantic_generic_metadata__["args"][0]  # type:ignore
+        self.actor_address = actor_address
 
     async def __call__(self, *inputs: *I, timeout: float | None = None) -> O:
         from actorium.system import _get_system
 
+        type I2 = Any  # `tuple[*I]`, which is not yet supported.
         if not TYPE_CHECKING:
-            I = self.__pydantic_generic_metadata__["args"][0]
-            O = self.__pydantic_generic_metadata__["args"][1]
+            I2 = tuple[self._args[:-1]]
+            O = self._args[-1]
 
         reply_to = Future[O]()
-        # msg = RpcMessage[tuple[*I], O](
-        msg = RpcMessage[Any, O](
+        msg = RpcMessage[I2, O](
             inputs=inputs,
             reply_to=reply_to.actor,
         )
-        _get_system().call_actor_soon(self.actor_address, msg, self._serialize)
+        _get_system().call_actor_soon(self.actor_address, serialize(msg))
 
         with fail_after(timeout):
             return await reply_to.result()
-
-    @classmethod
-    def _serialize(cls, message: RpcMessage[tuple[*I], O]) -> SerializedMessage:
-        breakpoint()
-        type_adapter: TypeAdapter[RpcMessage[tuple[*I], O]] = TypeAdapter(
-            cls.message_type()
-        )
-        return SerializedMessage(data=type_adapter.dump_json(message).decode())

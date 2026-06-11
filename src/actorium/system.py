@@ -1,14 +1,12 @@
-import contextvars
 from asyncio import CancelledError, Future, get_running_loop
 from collections import defaultdict
 from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
-from typing import AsyncGenerator, Callable, Literal, Protocol, assert_never
+from typing import Any, AsyncGenerator, Protocol, assert_never
 from uuid import UUID, uuid4
 
-import anyio
 from anyio import (
     Event,
     create_memory_object_stream,
@@ -19,22 +17,19 @@ from anyio import (
 from anyio.abc import TaskGroup
 from anyio.from_thread import start_blocking_portal
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from pydantic import BaseModel, TypeAdapter
+from msgspec import Struct
 from typing_extensions import TypeForm
 
-from actorium.actor import (
-    ActorFactory,
-    BaseActor,
-    RawMailbox,
-    SerializedMessage,
-)
+from actorium.actor import ActorFactory, BaseActor, RawMailbox
+from actorium.serialization import SerializedData, deserialize, serialize
 from actorium.types import ActorAddress, ActorId, SystemId
 from actorium.utils import TtlMap
+
+from .utils import substitute_type
 
 __all__ = [
     "ActorSystem",
     "lookup",
-    "run",
     "spawn",
     "GatewayMessage",
 ]
@@ -42,30 +37,30 @@ __all__ = [
 type GatewayMessage = MessageForActor | PublishRoute | Register | Unregister
 
 
-class MessageForActor(BaseModel):
-    type_: Literal["message-for-actor"] = "message-for-actor"
+class _GatewayMessage(Struct, tag=str.lower):
+    pass
+
+
+class MessageForActor(_GatewayMessage):
     actor_address: ActorAddress
-    message: SerializedMessage  # Json serialized.
+    message: SerializedData
 
 
-class PublishRoute(BaseModel):
-    "Tell the other side that we handle this system_id."
+class PublishRoute(_GatewayMessage):
+    """Tells the other side that we handle this system_id."""
 
-    type_: Literal["publish-route"] = "publish-route"
     system_id: SystemId
     lease_time_seconds: float
 
 
-class Register(BaseModel):
-    type: Literal["register"] = "register"
+class Register(_GatewayMessage):
     name: str
-    ref: object  # ActorAddress
+    ref: SerializedData  # (serialized) ActorAddress
     lease_time_seconds: float
     unregister_key: UUID
 
 
-class Unregister(BaseModel):
-    type_: Literal["unregister"] = "unregister"
+class Unregister(_GatewayMessage):
     name: str
 
     # The `Unregister` is only process if the key corresponds to what was
@@ -80,7 +75,7 @@ _CURRENT_ACTOR: ContextVar[BaseActor | None] = ContextVar("_CURRENT_ACTOR")
 
 @dataclass
 class _NameRegistration:
-    ref: object
+    ref: SerializedData  # (serialized) object
     unregister_key: UUID
 
 
@@ -112,7 +107,7 @@ class ActorSystem:
 
         # Name registration.
         self._name_to_actor_address: dict[str, _NameRegistration] = {}
-        self._name_to_actor_address_waiters: dict[str, set[Future[object]]] = (
+        self._name_to_actor_address_waiters: dict[str, set[Future[SerializedData]]] = (
             defaultdict(set)
         )
 
@@ -173,7 +168,10 @@ class ActorSystem:
         name: str | None = None,
     ) -> R:
         # Initialize actor class.
-        actor = factory(*args)
+        try:
+            actor = factory(*args)
+        except BaseException:
+            breakpoint()
 
         # Run `actor_post_init` -> here the actor can create its mailboxes.
         def create_mailbox() -> RawMailbox:
@@ -216,9 +214,16 @@ class ActorSystem:
         ref: object,
         is_main: bool,
     ) -> None:
+        assert isinstance(factory, type)
+
         async with AsyncExitStack() as stack:
             if name is not None:
-                await stack.enter_async_context(self._register(ref, name))
+                return_annotation = factory.actor_ref.__annotations__["return"]
+                await stack.enter_async_context(
+                    self._register(
+                        ref, substitute_type(return_annotation, factory), name
+                    )
+                )
 
             with _CURRENT_ACTOR.set(actor):
                 async with create_task_group() as tg:
@@ -240,11 +245,13 @@ class ActorSystem:
                             self._terminate_event.set()
 
     @asynccontextmanager
-    async def _register(self, ref: object, name: str) -> AsyncGenerator[None]:
+    async def _register(
+        self, ref: object, typeform: TypeForm[Any], name: str
+    ) -> AsyncGenerator[None]:
         unregister_key = uuid4()
 
         # Serialize
-        ref = TypeAdapter(type(ref)).dump_python(ref, mode="json")
+        ref = serialize(ref)
 
         self._name_to_actor_address[name] = _NameRegistration(
             ref=ref, unregister_key=unregister_key
@@ -280,7 +287,7 @@ class ActorSystem:
             self._name_to_actor_address.pop(msg.name)
         # TODO broadcast `Unregister`!
 
-    async def lookup(self, name: str, timeout: float | None = None) -> object:
+    async def lookup(self, name: str, timeout: float | None = None) -> SerializedData:
         # Look for local registration.
         registration = self._name_to_actor_address.get(name)
         if registration is not None:
@@ -292,7 +299,7 @@ class ActorSystem:
             if registration is not None:
                 return registration.ref
 
-        f = Future[object]()
+        f = Future[SerializedData]()
         self._name_to_actor_address_waiters[name].add(f)
         try:
             with fail_after(timeout):
@@ -307,7 +314,7 @@ class ActorSystem:
     ) -> AsyncGenerator[MemoryObjectReceiveStream[GatewayMessage]]:
         """
         Gateways should subscribe to the system state, and forward all
-        `PublishMessage` to the other system.
+        `GatewayMessage` to the other system.
         """
         # To gateway
         to_gateway_writer, to_gateway_reader = create_memory_object_stream[
@@ -363,7 +370,7 @@ class ActorSystem:
                         case MessageForActor(
                             actor_address=actor_address, message=message
                         ):
-                            await self._call_actor(actor_address, message, lambda s: s)
+                            await self._call_actor(actor_address, message)
                         case PublishRoute(
                             system_id=system_id,
                             lease_time_seconds=lease_time_seconds,
@@ -388,8 +395,7 @@ class ActorSystem:
                             this_gateway.registered_names.set(
                                 name,
                                 _NameRegistration(
-                                    ref=ref,
-                                    unregister_key=unregister_key,
+                                    ref=ref, unregister_key=unregister_key
                                 ),
                                 ttl_seconds=lease_time_seconds,
                             )
@@ -425,13 +431,12 @@ class ActorSystem:
     async def _call_actor[T](
         self,
         actor_address: ActorAddress,
-        message: T,
-        serialize: Callable[[T], SerializedMessage],
+        serialized_message: SerializedData,
     ) -> None:
         system_id = actor_address.system_id
         actor_id = actor_address.actor_id
 
-        # If this message if for *this* actor system, then directly route into
+        # If this message is for *this* actor system, then directly route into
         # the right actor.
         if system_id == self._system_id:
             # Route into the right callback.
@@ -441,44 +446,33 @@ class ActorSystem:
                 # print("Actor not found.")
                 pass
             else:
-                mailbox.feed(message)
+                mailbox.feed(serialized_message)
             return
 
         for gateway in self._gateways:
             if system_id in gateway.system_ids.keys():
                 await gateway.to_gateway_writer.send(
                     MessageForActor(
-                        actor_address=actor_address, message=serialize(message)
+                        actor_address=actor_address, message=serialized_message
                     )
                 )
                 return
 
         print(f"No route to actor system_id={system_id}, self={self._system_id}")
 
-    def call_actor_soon[T](
-        self,
-        actor_address: ActorAddress,
-        message: T,
-        serialize: Callable[[T], SerializedMessage],
+    def call_actor_soon(
+        self, actor_address: ActorAddress, serialized_message: SerializedData
     ) -> None:
         """
         Threadsafe call to send a message to any actor started by this actor
         system.
         """
-        self._task_group.start_soon(self._call_actor, actor_address, message, serialize)
+        self._task_group.start_soon(self._call_actor, actor_address, serialized_message)
 
 
 @dataclass
 class SpawnOptions:
     respawn_on_failure: bool = False
-
-
-def run[A: BaseActor, R, *P](factory: ActorFactory[A, R, *P], /, *args: *P) -> None:
-    async def main() -> None:
-        await ActorSystem.create_and_run(factory, *args)
-
-    ctx = contextvars.copy_context()
-    ctx.run(anyio.run, main)
 
 
 class _ActorRefType[T](Protocol):
@@ -521,12 +515,12 @@ def spawn[A: BaseActor, R, *P](
     return system.spawn(factory, *args, name=name)
 
 
-async def lookup[T](name: str, type_: TypeForm[T], timeout: float | None = None) -> T:
+async def lookup[T](name: str, type_: type[T], timeout: float | None = None) -> T:
     system = _get_system()
 
     value = await system.lookup(name, timeout=timeout)
 
-    return TypeAdapter(type_).validate_python(value)
+    return deserialize(value, type=type_)
 
 
 @asynccontextmanager

@@ -13,9 +13,9 @@ from anyio import (
 )
 from anyio.abc import SocketStream
 from anyio.streams.memory import MemoryObjectSendStream
-from pydantic import TypeAdapter
 
 from actorium.actors import SimpleActor
+from actorium.serialization import deserialize, serialize
 from actorium.system import GatewayMessage, connect_gateway
 
 from ._line_protocol import LineReceiver
@@ -28,7 +28,6 @@ __all__ = [
 
 type Host = IPv4Address | str
 
-_adapter: TypeAdapter[GatewayMessage] = TypeAdapter(GatewayMessage)
 
 _logger = getLogger(__name__)
 
@@ -98,7 +97,7 @@ async def handle_tcp_connection(client: SocketStream) -> None:
         line_receiver = LineReceiver(client)
 
         async for line in line_receiver:
-            msg = _adapter.validate_json(line)
+            msg = deserialize(line, type=GatewayMessage)
             await writer.send(msg)
 
     async with (
@@ -109,7 +108,7 @@ async def handle_tcp_connection(client: SocketStream) -> None:
 
         try:
             async for msg in system_to_tcp:
-                await client.send(msg.model_dump_json().encode() + b"\n")
+                await client.send(serialize(msg).encode() + b"\n")
         except BrokenResourceError:
             # Other side went away. Cancel and leave.
             tg.cancel_scope.cancel()
