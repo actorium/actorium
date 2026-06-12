@@ -21,6 +21,7 @@ from msgspec import Struct
 from typing_extensions import TypeForm
 
 from actorium.actor import ActorFactory, BaseActor, RawMailbox
+from actorium.logger import logger
 from actorium.serialization import SerializedData, deserialize, serialize
 from actorium.types import ActorAddress, ActorId, SystemId
 from actorium.utils import TtlMap
@@ -443,8 +444,7 @@ class ActorSystem:
             try:
                 mailbox = self._actor_mailboxes[actor_id]
             except KeyError:
-                # print("Actor not found.")
-                pass
+                logger.warning("Actor not found: actor_id=%s", actor_id)
             else:
                 mailbox.feed(serialized_message)
             return
@@ -458,7 +458,12 @@ class ActorSystem:
                 )
                 return
 
-        print(f"No route to actor system_id={system_id}, self={self._system_id}")
+        logger.warning(
+            "No route to actor actor_id=%s, system_id=%s, current_system_id=%s",
+            actor_id,
+            system_id,
+            self._system_id,
+        )
 
     def call_actor_soon(
         self, actor_address: ActorAddress, serialized_message: SerializedData

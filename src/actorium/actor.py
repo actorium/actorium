@@ -80,14 +80,14 @@ class ActorFactory[A: BaseActor, R, *P](Protocol):
         """
 
     def actor_post_init(
-        self, state: A, create_mailbox: Callable[[], RawMailbox]
+        self, __state: A, create_mailbox: Callable[[], RawMailbox]
     ) -> None:
         """
         Initialization for specific actor type. This is the place where
         mailboxes are created.
         """
 
-    def actor_ref(self, state: A) -> R:
+    def actor_ref(self, __state: A) -> R:
         """
         Actor reference that gets returned by the `spawn()` function after
         starting the actor.
@@ -99,7 +99,7 @@ class ActorFactory[A: BaseActor, R, *P](Protocol):
             protocol represents the class, not the instance.)
         """
 
-    async def actor_run(self, state: A, /) -> None:
+    async def actor_run(self, __state: A, /) -> None:
         """
         Entry point for the actor. This is where the actor can consume its
         mailbox.

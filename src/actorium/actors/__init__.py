@@ -4,6 +4,7 @@ from .registry import Registration, Registry, RegistryRef
 from .signals import Signal, SignalReader, SignalWriter, Undefined
 from .simple import Mailbox, SimpleActor, SimpleRef
 from .simple_rpc import RpcActor, RpcRef
+from .subscribe import Subscribe, SubscribeWithId
 from .timers import CallAfterTimeout
 
 __all__ = [
@@ -32,4 +33,7 @@ __all__ = [
     "Registration",
     # Timers
     "CallAfterTimeout",
+    # Subscribe
+    "Subscribe",
+    "SubscribeWithId",
 ]

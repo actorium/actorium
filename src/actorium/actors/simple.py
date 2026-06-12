@@ -2,7 +2,6 @@ from abc import abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Self
 
-from logging import getLogger
 import msgspec
 from typing_extensions import TypeForm
 
@@ -87,7 +86,7 @@ class Mailbox[*T]:
                 logger.warning(
                     "Cannot deserialize message in actor mailbox type=%s, message=%s",
                     repr(tuple[*T]),
-                    repr(message[:10] + "..." if len(message) > 10 else message),
+                    repr(message[:30] + "..." if len(message) > 30 else message),
                 )
                 continue
             else:

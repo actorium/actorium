@@ -1,5 +1,5 @@
 import asyncio
-from typing import TYPE_CHECKING, get_args
+from typing import TYPE_CHECKING
 
 from actorium.system import spawn
 from actorium.utils import generic_class_getitem

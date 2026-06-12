@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable
 from typing import Type as TypingType
 
-from mypy.nodes import Decorator, TypeInfo
+from mypy.nodes import Decorator, FuncDef, MemberExpr, TypeInfo
 from mypy.plugin import AttributeContext, Plugin
 from mypy.types import AnyType, CallableType, Instance, Type, TypeOfAny, get_proper_type
 
@@ -72,10 +72,42 @@ class ActoriumPlugin(Plugin):
                 type_info = arg_expr.node.type
                 instance_type = Instance(type_info, [])
 
-        if not type_info:
+        if not type_info or not instance_type:
             return ctx.default_return_type
 
-        # Check if this is a BehaviorActor subclass
+        # Check if this actor has a custom actor_ref implementation
+        # (look for it in the class itself, not in base classes)
+        actor_ref_method = None
+        symbol = type_info.names.get("actor_ref")
+        if symbol is not None and symbol.node is not None:
+            # Handle both decorated and non-decorated methods
+            if isinstance(symbol.node, Decorator):
+                func_def = symbol.node.func
+            elif isinstance(symbol.node, FuncDef):
+                func_def = symbol.node
+            else:
+                func_def = None
+
+            if func_def and func_def.type and isinstance(func_def.type, CallableType):
+                actor_ref_method = func_def.type
+
+        # If we found a custom actor_ref, use its return type
+        if actor_ref_method is not None:
+            # Apply type substitutions if the actor is generic
+            if instance_type.args:
+                actor_ref_method = self._apply_type_substitutions(
+                    actor_ref_method, type_info, list(instance_type.args)
+                )
+
+            # Get the return type of actor_ref()
+            ret_type = actor_ref_method.ret_type
+
+            # Substitute Self with the actual instance type
+            ret_type = self._substitute_self_in_type(ret_type, instance_type, type_info)
+
+            return ret_type
+
+        # Check if this is a BehaviorActor subclass (default behavior)
         is_behavior_actor = any(
             base.fullname == "actorium.actors.behaviors.BehaviorActor"
             for base in type_info.mro
@@ -84,10 +116,7 @@ class ActoriumPlugin(Plugin):
         if not is_behavior_actor:
             return ctx.default_return_type
 
-        # For BehaviorActor, we know actor_ref returns BehaviorRef[Self]
-        # So we'll construct this type directly
-
-        # Get BehaviorRef TypeInfo
+        # For BehaviorActor without custom actor_ref, return BehaviorRef[instance_type]
         try:
             module = ctx.api.modules.get("actorium.actors.behaviors")  # type: ignore[attr-defined]
             if not module:
@@ -96,10 +125,6 @@ class ActoriumPlugin(Plugin):
             behavior_ref_sym = module.names.get("BehaviorRef")
             if not behavior_ref_sym or not isinstance(behavior_ref_sym.node, TypeInfo):
                 return ctx.default_return_type
-
-            # Use the instance_type we determined earlier (which includes type arguments for generics)
-            if not instance_type:
-                instance_type = Instance(type_info, [])
 
             # Return BehaviorRef[instance_type]
             result = Instance(behavior_ref_sym.node, [instance_type])
@@ -271,7 +296,11 @@ class ActoriumPlugin(Plugin):
             return ctx.default_attr_type
 
         # Get the attribute name being accessed
-        attribute_name = ctx.context.name  # type: ignore[attr-defined]
+        # ctx.context should be a MemberExpr when accessing attributes
+        if not isinstance(ctx.context, MemberExpr):
+            return ctx.default_attr_type
+
+        attribute_name = ctx.context.name
 
         # Find if this attribute corresponds to a @behavior or @rpc method
         actor_class_info = actor_type.type
@@ -312,6 +341,27 @@ class ActoriumPlugin(Plugin):
 
         # Not a behavior or rpc method, use default
         return ctx.default_attr_type
+
+    def _find_actor_ref_method(self, actor_class_info: TypeInfo) -> CallableType | None:
+        """Find the actor_ref method on the actor class"""
+        # Check the class and all its bases
+        for base in [actor_class_info] + actor_class_info.mro[:-1]:
+            symbol = base.names.get("actor_ref")
+            if symbol is None or symbol.node is None:
+                continue
+
+            # Handle both decorated and non-decorated methods
+            if isinstance(symbol.node, Decorator):
+                func_def = symbol.node.func
+            elif isinstance(symbol.node, FuncDef):
+                func_def = symbol.node
+            else:
+                continue
+
+            if func_def.type and isinstance(func_def.type, CallableType):
+                return func_def.type
+
+        return None
 
     def _find_decorated_method(
         self, actor_class_info: TypeInfo, method_name: str, decorator_name: str

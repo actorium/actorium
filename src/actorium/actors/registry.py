@@ -3,16 +3,22 @@ from collections import defaultdict
 from typing import Never
 
 from anyio import move_on_after
+from msgspec import Struct
 
-from actorium.utils import TtlMap
+from actorium.utils import TtlMap, TtlSet
 
 from .behaviors import BehaviorActor, BehaviorRef, behavior, rpc
-from .simple import SimpleActor
+from .simple import SimpleActor, SimpleRef
 
 __all__ = [
     "Registry",
     "Registration",
 ]
+
+
+class RegistrySubscribeNotification[T](Struct):
+    name: str
+    value: T
 
 
 class Registry[T](BehaviorActor):
@@ -36,12 +42,9 @@ class Registry[T](BehaviorActor):
     def __init__(self) -> None:
         self._registered_data: TtlMap[str, T] = TtlMap()
         self._get_waiters: dict[str, set[Future[T]]] = defaultdict(set)
-
-    #    def actor_ref(self) -> RegistryRef[T]:
-    #        if not TYPE_CHECKING:
-    #            T = get_args(self.__orig_class__)[0]
-    #
-    #        return RegistryRef[T](**super().actor_ref().__dict__)
+        self._subscriptions: TtlSet[SimpleRef[RegistrySubscribeNotification[T]]] = (
+            TtlSet()
+        )
 
     @behavior
     def publish(self, name: str, value: T, ttl_seconds: float) -> None:
@@ -76,22 +79,22 @@ class Registry[T](BehaviorActor):
     async def keys(self) -> list[str]:
         return list(self._registered_data.keys())
 
+    @behavior
+    def subscribe(
+        self, reply_to: SimpleRef[RegistrySubscribeNotification[T]], ttl_seconds: float
+    ) -> None:
+        self._subscriptions.add(reply_to, ttl_seconds)
+        for name, value in self._registered_data.items():
+            reply_to.tell(RegistrySubscribeNotification(name=name, value=value))
 
-# class RegistryRef[T](BehaviorRef[Registry[T]]):
-#    @cache
-#    @staticmethod
-#    def __class_getitem__(item: type) -> type:
-#        class _RegistryRef(RegistryRef):  # type: ignore
-#            # Actor class that the behavior is pointing to.
-#            _a = Registry[item]  # type: ignore
-#            _t = item
-#
-#        return _RegistryRef
-#
-#    def register(self, name: str, value: T) -> None:
-#        spawn(Registration[T], self, name, value)
+    @behavior
+    def unsubscribe(self, actor: SimpleRef[RegistrySubscribeNotification[T]]) -> None:
+        self._subscriptions.discard(actor)
 
-type RegistryRef[T] = BehaviorRef[Registry[T]]
+
+# type RegistryRef[T] = BehaviorRef[Registry[T]]
+class RegistryRef[T](BehaviorRef[Registry[T]]):
+    pass
 
 
 class Registration[T](SimpleActor[Never]):

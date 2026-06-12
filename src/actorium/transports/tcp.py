@@ -15,7 +15,7 @@ from anyio.abc import SocketStream
 from anyio.streams.memory import MemoryObjectSendStream
 
 from actorium.actors import SimpleActor
-from actorium.serialization import deserialize, serialize
+from actorium.serialization import SerializedData, deserialize, serialize
 from actorium.system import GatewayMessage, connect_gateway
 
 from ._line_protocol import LineReceiver
@@ -97,7 +97,7 @@ async def handle_tcp_connection(client: SocketStream) -> None:
         line_receiver = LineReceiver(client)
 
         async for line in line_receiver:
-            msg = deserialize(line, type=GatewayMessage)
+            msg = deserialize(SerializedData(line), type=GatewayMessage)
             await writer.send(msg)
 
     async with (

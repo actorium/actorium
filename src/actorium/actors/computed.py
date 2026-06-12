@@ -7,8 +7,9 @@ from typemap_extensions import Iter
 from actorium.system import spawn
 
 from .behaviors import BehaviorActor, behavior
-from .signals import Signal, SignalReader, SignalSubscribeWithId, Undefined
+from .signals import Signal, SignalReader, Undefined
 from .simple import SimpleRef
+from .subscribe import SubscribeWithId
 
 __all__ = [
     "computed",
@@ -84,7 +85,7 @@ class _Observer[*T, V](BehaviorActor):
     async def actor_init(self) -> None:
         for i, reactive in enumerate(self._reactives):
             # typing: `Union[*T]` instead of `Any`.
-            spawn(SignalSubscribeWithId[Any], reactive, self.actor_ref().changed, i)
+            spawn(SubscribeWithId[Any], reactive, self.actor_ref().changed, i)
 
     @behavior
     # async def changed(self, id: int, value: Union[*T]) -> None:
