@@ -195,6 +195,12 @@ def generic_class_getitem(cls, items: Any) -> type:
 
     return type(
         f"{cls.__name__}[{', '.join(getattr(i, '__name__', repr(i)) for i in all_items)}]",
+
+        # XXX: here instead of inheriting from 'cls', inherit from
+        #      `substitute_type(cls.__bases__)`. Also, for all the new methods
+        #      defined on `cls`, wrap them, substituting types.
+        #      Doing that, should make the class non-generic at initialization
+        #      time.
         (cls,),
         {
             "_args": all_items,

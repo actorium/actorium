@@ -54,7 +54,9 @@ class SubscribeWithId[T](SimpleActor[T]):
         self._id = id
 
     async def actor_run(self) -> None:
-        # Tell signal to send updates here.
+        # XXX: we do not yet have runtime type information for T here!
+
+        # Tell 'ref' to send updates here.
         spawn(Subscribe[T], self._ref, self.actor_ref())
 
         # Forward to `reply_to` address with ID.
