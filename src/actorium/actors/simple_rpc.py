@@ -7,9 +7,9 @@ from msgspec import Struct
 from typing_extensions import TypeForm
 
 from actorium.actor import BaseActor, RawMailbox
+from actorium.runtime_generic import runtime_generic
 from actorium.serialization import deserialize, serialize
 from actorium.types import ActorAddress
-from actorium.utils import generic_class_getitem
 
 from .future import Future
 from .simple import SimpleRef
@@ -33,6 +33,7 @@ class RpcMessage[I: tuple[Any, ...], O](Struct):
     reply_to: SimpleRef[O]
 
 
+@runtime_generic
 class RpcActor[*I, O](BaseActor):
     """
     Simple Pydantic based actor implementation that receives messages of a
@@ -43,46 +44,49 @@ class RpcActor[*I, O](BaseActor):
     `TypeAdapter`.
     """
 
-    __class_getitem__ = generic_class_getitem
-
     def actor_post_init(self, create_mailbox: Callable[[], RawMailbox]) -> None:
-        if not TYPE_CHECKING:
-            I = self._args[:-1]
-            O = self._args[-1]
+        if TYPE_CHECKING:
+            i = I
+            o = O
+        else:
+            i = self._typevar_to_args[I]
+            o = self._typevar_to_args[O]
 
         self._raw_mailbox: RawMailbox = create_mailbox()
-        self.mailbox = RpcMailbox[tuple[*I], O](
+        self.mailbox = RpcMailbox[tuple[*i], o](
             # Make sure that if `actor_ref` is overridden, that we take the
             # message type from there.
-            RpcMessage[tuple[*I], O],
+            RpcMessage[tuple[*i], o],
             self._raw_mailbox,
         )
 
     def actor_ref(self) -> RpcRef[*I, O]:
-        if not TYPE_CHECKING:
-            I = self._args[:-1]
-            O = self._args[-1]
+        if TYPE_CHECKING:
+            i = I
+            o = O
+        else:
+            i = self._typevar_to_args[I]
+            o = self._typevar_to_args[O]
 
-        return RpcRef[*I, O](actor_address=self._raw_mailbox.address)
+        return RpcRef[*i, o](actor_address=self._raw_mailbox.address)
 
     @abstractmethod
     async def actor_run(self) -> None:
         pass
 
 
+@runtime_generic
 class RpcMailbox[I: tuple[Any, ...], O]:
     """
     Mailbox for a single actor from where the actor can receive messages.
     """
-
-    __class_getitem__ = generic_class_getitem
 
     def __init__(
         self,
         message_type: TypeForm[RpcMessage[I, O]],
         raw_mailbox: RawMailbox,
     ) -> None:
-        assert hasattr(self, "_args")
+        assert hasattr(self, "_typevar_to_args")
         self._message_type = message_type
         self._raw_mailbox = raw_mailbox
 
@@ -90,16 +94,20 @@ class RpcMailbox[I: tuple[Any, ...], O]:
         return self
 
     async def __anext__(self) -> RpcMessage[I, O]:
-        if not TYPE_CHECKING:
-            I = self._args[0]
-            O = self._args[1]
+        if TYPE_CHECKING:
+            i = I
+            o = O
+        else:
+            i = self._typevar_to_args[I]
+            o = self._typevar_to_args[O]
 
         message = await self._raw_mailbox.next()
 
-        msg: RpcMessage[I, O] = deserialize(message, type=RpcMessage[I, O])
+        msg: RpcMessage[i, o] = deserialize(message, type=RpcMessage[i, o])
         return msg
 
 
+@runtime_generic
 class RpcRef[*I, O]:
     """
     Reference/handle to an actor that has been spawned somewhere, possibly in
@@ -109,23 +117,23 @@ class RpcRef[*I, O]:
     part of a message to any other actor.
     """
 
-    __class_getitem__ = generic_class_getitem
-
     def __init__(self, actor_address: ActorAddress) -> None:
-        assert hasattr(self, "_args")
+        assert hasattr(self, "_typevar_to_args")
 
         self.actor_address = actor_address
 
     async def __call__(self, *inputs: *I, timeout: float | None = None) -> O:
         from actorium.system import _get_system
 
-        type I2 = Any  # `tuple[*I]`, which is not yet supported.
-        if not TYPE_CHECKING:
-            I2 = tuple[self._args[:-1]]
-            O = self._args[-1]
+        if TYPE_CHECKING:
+            i = self._typevar_to_args[I]
+            o = self._typevar_to_args[O]
+        else:
+            i = I
+            o = O
 
-        reply_to = Future[O]()
-        msg = RpcMessage[I2, O](
+        reply_to = Future[o]()
+        msg = RpcMessage[tuple[*i], o](
             inputs=inputs,
             reply_to=reply_to.actor,
         )

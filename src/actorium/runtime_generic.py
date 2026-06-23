@@ -1,5 +1,6 @@
+from functools import cache
 from types import GenericAlias, new_class
-from typing import Any, TypeVar, TypeVarTuple, get_origin
+from typing import Any, TypeVar, TypeVarTuple, cast, get_origin
 
 from msgspec import Struct
 from typing_extensions import TypeForm
@@ -16,17 +17,17 @@ def runtime_generic[T: type[Any]](type_: T) -> T:
     When the generic class is indexed with [type], this substitutes type
     parameters across all methods and attributes of the decorated generic.
     """
-    original_class_getitem = type_.__class_getitem__
+    original_class_getitem = getattr(type_, "__class_getitem__", None)
 
-    @classmethod
-    def __class_getitem__(cls, items: Any) -> T:
+    @cache
+    def __class_getitem__(cls: Any, items: Any) -> T:
         parameters = cls.__parameters__
 
         if not isinstance(items, tuple):
-            return cls[(items,)]
+            return __class_getitem__(cls, (items,))
 
         # Map type parameters.
-        typevar_to_args: dict[TypeVar | TypeVarTuple, TypeForm] = {}
+        typevar_to_args: dict[TypeVar | TypeVarTuple, TypeForm[Any]] = {}
         params = parameters[:]
 
         while params and isinstance(params[0], TypeVar):
@@ -48,16 +49,15 @@ def runtime_generic[T: type[Any]](type_: T) -> T:
         if items:
             raise TypeError(f"Too many type parameters given for class {cls!r}")
 
-        return cls._generic_substitute_(typevar_to_args)
+        return cast(T, cls._generic_substitute_(typevar_to_args))
 
-    @classmethod
     def _generic_substitute_(
-        cls, typevar_to_args: dict[TypeVar | TypeVarTuple, TypeForm]
+        cls: Any, typevar_to_args: dict[TypeVar | TypeVarTuple, TypeForm[Any]]
     ) -> T:
         parameters = cls.__parameters__
 
         # Compute new name.
-        def type_name(t: type) -> str:
+        def type_name(t: TypeForm[Any]) -> str:
             if hasattr(t, "__name__"):
                 name = t.__name__
             else:
@@ -89,6 +89,7 @@ def runtime_generic[T: type[Any]](type_: T) -> T:
                 )
 
         if issubclass(cls, Struct):
+            assert original_class_getitem is not None
             base = original_class_getitem(tuple(type_params))
         else:
             base = cls
@@ -111,14 +112,21 @@ def runtime_generic[T: type[Any]](type_: T) -> T:
             ),
         )
 
-    type_.__class_getitem__ = __class_getitem__
-    type_._generic_substitute_ = _generic_substitute_
+    type_.__class_getitem__ = classmethod(__class_getitem__)
+    type_._generic_substitute_ = classmethod(_generic_substitute_)
     return type_
+
+
+def substitute_types(type_definition: TypeForm[Any], orig_class: Any) -> TypeForm[Any]:
+    return _substitute_types(
+        type_definition,
+        typevar_to_args=getattr(orig_class, "_typevar_to_args", {}),
+    )
 
 
 def _substitute_types(
     type_definition: TypeForm[Any],
-    typevar_to_args: dict[TypeVar | TypeVarTuple, TypeForm],
+    typevar_to_args: dict[TypeVar | TypeVarTuple, TypeForm[Any]],
 ) -> TypeForm[Any]:
     if isinstance(type_definition, TypeVar):
         # Lookup.
@@ -138,11 +146,5 @@ def _substitute_types(
     # If this is generic class.
     if hasattr(type_definition, "_generic_substitute_"):
         return type_definition._generic_substitute_(typevar_to_args)
-    #        return type_definition._generic_cls[
-    #            *[
-    #                _substitute_types(arg, type_params, args)
-    #                for arg in type_definition._args
-    #            ]
-    #        ]
 
     return type_definition

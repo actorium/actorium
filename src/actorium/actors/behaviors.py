@@ -17,7 +17,7 @@ from msgspec import Struct
 from typing_extensions import TypeForm
 
 from actorium.actor import BaseActor, RawMailbox
-from actorium.utils import generic_class_getitem, substitute_type
+from actorium.runtime_generic import runtime_generic, substitute_types
 
 from .simple import Mailbox, SimpleActor, SimpleRef
 from .simple_rpc import RpcMailbox, RpcMessage, RpcRef
@@ -40,11 +40,6 @@ class _BehaviorMethod[*I]:
             func.__annotations__[name] for name in input_param_names
         ]
 
-        # TODO: this is not accurate! We should test whether the last param is called 'reply_to'.
-        self.is_rpc_behavior = (
-            len(input_param_names) > 0 and input_param_names[-1] == "reply_to"
-        )
-
     def call(self, behavior_actor: BehaviorActor, *param: *I) -> None:
         self._func(behavior_actor, *param)
 
@@ -58,7 +53,7 @@ class _BehaviorMethod[*I]:
 
     def get_input_types(self, orig_class: type) -> list[TypeForm[Any]]:
         return [
-            substitute_type(input_type, orig_class) for input_type in self.input_types
+            substitute_types(input_type, orig_class) for input_type in self.input_types
         ]
 
 
@@ -88,11 +83,11 @@ class _RpcMethod[*I, O]:
 
     def get_input_types(self, orig_class: type) -> list[TypeForm[tuple[Any]]]:
         return [
-            substitute_type(input_type, orig_class) for input_type in self.input_types
+            substitute_types(input_type, orig_class) for input_type in self.input_types
         ]
 
     def get_output_type(self, orig_class: type) -> TypeForm[O]:
-        return substitute_type(self.output_type, orig_class)
+        return substitute_types(self.output_type, orig_class)
 
 
 def behavior[*I](method: Callable[[Any, *I], None]) -> _BehaviorMethod[*I]:
@@ -112,6 +107,7 @@ def rpc[*I, O](
     return _RpcMethod(method)
 
 
+@runtime_generic
 class BehaviorActor(BaseActor):
     """
     Actor implementation that works by defining multiple `@behavior` or `@rpc`
@@ -139,9 +135,6 @@ class BehaviorActor(BaseActor):
         # RPC calls need to be called using await.
         result = await ref.rpc.double_it(4)
     """
-
-    # Better support for generic behavior actors:
-    __class_getitem__ = generic_class_getitem
 
     def actor_post_init(self, create_mailbox: Callable[[], RawMailbox]) -> None:
         # Create one mailbox for each 'behavior'.
@@ -240,7 +233,7 @@ class BehaviorActor(BaseActor):
 
 
 def get_behaviors_from_class(
-    cls: TypeForm[BehaviorActor], only_rpc: bool = False
+    cls: TypeForm[BehaviorActor],
 ) -> dict[str, _BehaviorMethod[Any, Any]]:
     """
     Derive behavior methods for `BehaviorActor` class.
@@ -258,15 +251,13 @@ def get_behaviors_from_class(
         except AttributeError:
             continue
         if isinstance(value, _BehaviorMethod):
-            if only_rpc and not value.is_rpc_behavior:
-                continue
             behaviors[name] = value
 
     return behaviors
 
 
 def get_rpc_methods_from_class(
-    cls: TypeForm[BehaviorActor], only_rpc: bool = False
+    cls: TypeForm[BehaviorActor],
 ) -> dict[str, _RpcMethod[Any, Any]]:
     if isinstance(cls, GenericAlias):
         cls = typing.get_origin(cls)

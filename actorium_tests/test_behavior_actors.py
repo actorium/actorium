@@ -1,14 +1,5 @@
-from typing import Never
-
-from actorium import (
-    BehaviorActor,
-    BehaviorRef,
-    SimpleActor,
-    create_actor_system_and_run,
-    rpc,
-    run,
-    spawn,
-)
+from actorium import BehaviorActor, BehaviorRef, create_actor_system_and_run, rpc, spawn
+from actorium.actors.behaviors import _RpcMethod
 
 
 def test_behavior_actors() -> None:
@@ -85,6 +76,18 @@ def test_generic_behavior_actor() -> None:
 
     create_actor_system_and_run(main)
     assert did_run
+
+
+def test_generic_behavior_actor_type_inference() -> None:
+    class GenericBehaviorActor[T](BehaviorActor):
+        @rpc
+        async def return_value(self, value: list[T], value2: T) -> tuple[T, T]:
+            return value[0], value[0]
+
+    assert isinstance(GenericBehaviorActor[int].return_value, _RpcMethod)
+    instance = GenericBehaviorActor[int]()
+    assert instance.return_value.get_input_types(instance) == [list[int], int]
+    assert instance.return_value.get_output_type(instance) == tuple[int, int]
 
 
 def test_types() -> None:

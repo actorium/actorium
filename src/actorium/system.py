@@ -22,11 +22,10 @@ from typing_extensions import TypeForm
 
 from actorium.actor import ActorFactory, BaseActor, RawMailbox
 from actorium.logger import logger
+from actorium.runtime_generic import substitute_types
 from actorium.serialization import SerializedData, deserialize, serialize
 from actorium.types import ActorAddress, ActorId, SystemId
 from actorium.utils import TtlMap
-
-from .utils import substitute_type
 
 __all__ = [
     "ActorSystem",
@@ -171,7 +170,7 @@ class ActorSystem:
         # Initialize actor class.
         try:
             actor = factory(*args)
-        except BaseException:
+        except BaseException as e:
             breakpoint()
 
         # Run `actor_post_init` -> here the actor can create its mailboxes.
@@ -222,7 +221,7 @@ class ActorSystem:
                 return_annotation = factory.actor_ref.__annotations__["return"]
                 await stack.enter_async_context(
                     self._register(
-                        ref, substitute_type(return_annotation, factory), name
+                        ref, substitute_types(return_annotation, factory), name
                     )
                 )
 

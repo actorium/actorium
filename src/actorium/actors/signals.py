@@ -3,7 +3,8 @@ from typing import TYPE_CHECKING, final
 
 from msgspec import Struct
 
-from actorium.utils import TtlSet, generic_class_getitem
+from actorium.runtime_generic import runtime_generic
+from actorium.utils import TtlSet
 
 from .behaviors import BehaviorActor, behavior, rpc
 from .simple import SimpleRef
@@ -38,24 +39,27 @@ class SignalWriter[T](SimpleRef[T]):
     pass
 
 
+@runtime_generic
 class Signal[T](BehaviorActor):
-    __class_getitem__ = generic_class_getitem
-
     def __init__(self, initial: T | _UndefinedType = Undefined) -> None:
-        if not TYPE_CHECKING:
-            T = self._args[0]
+        if TYPE_CHECKING:
+            t = T
+        else:
+            t = self._typevar_to_args[T]
 
         self._value = initial
-        self._subscriptions: TtlSet[SimpleRef[T]] = TtlSet()
-        self._get_waiters: set[Future[T]] = set()
+        self._subscriptions: TtlSet[SimpleRef[t]] = TtlSet()
+        self._get_waiters: set[Future[t]] = set()
 
     def actor_ref(self) -> tuple[SignalReader[T], SimpleRef[T]]:
         behavior_ref = super().actor_ref()
 
-        if not TYPE_CHECKING:
-            T = self._args[0]
+        if TYPE_CHECKING:
+            t = T
+        else:
+            t = self._typevar_to_args[T]
 
-        reader = SignalReader[T](
+        reader = SignalReader[t](
             get=behavior_ref.get,
             subscribe=behavior_ref.subscribe,
             unsubscribe=behavior_ref.unsubscribe,
