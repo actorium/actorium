@@ -3,6 +3,8 @@ from functools import cache, wraps
 from types import FunctionType
 from typing import Any, Callable, Iterable, Protocol, TypeVar
 
+from actorium.runtime_generic import runtime_generic
+
 __all__ = [
     "TtlMap",
     "TtlSet",
@@ -11,6 +13,7 @@ __all__ = [
 ]
 
 
+@runtime_generic
 class TtlMap[K, V]:
     def __init__(self) -> None:
         self._data: dict[K, V] = {}
@@ -67,6 +70,7 @@ class TtlMap[K, V]:
             pass
 
 
+@runtime_generic
 class TtlSet[K]:
     def __init__(self) -> None:
         self._map = TtlMap[K, int]()

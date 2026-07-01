@@ -20,7 +20,7 @@ from actorium.actor import BaseActor, RawMailbox
 from actorium.runtime_generic import runtime_generic, substitute_types
 
 from .simple import Mailbox, SimpleActor, SimpleRef
-from .simple_rpc import RpcMailbox, RpcMessage, RpcRef
+from .simple_rpc import RpcMailbox, RpcRef
 
 __all__ = [
     "BehaviorActor",
@@ -149,7 +149,7 @@ class BehaviorActor(BaseActor):
         for name, be_method in behavior_methods.items():
             types = be_method.get_input_types(self.__class__)
             raw_mailbox = create_mailbox()
-            behavior_mailbox = Mailbox[*types](tuple[*types], raw_mailbox)  # type:ignore[valid-type]
+            behavior_mailbox = Mailbox[*types](raw_mailbox)  # type:ignore[valid-type]
             behavior_mailboxes[name] = behavior_mailbox
             behavior_addresses[name] = raw_mailbox.address
 
@@ -159,7 +159,6 @@ class BehaviorActor(BaseActor):
 
             raw_mailbox = create_mailbox()
             rpc_mailbox = RpcMailbox[tuple[*in_types], out_type](  # type:ignore[valid-type]
-                RpcMessage[tuple[*in_types], out_type],  # type:ignore[valid-type]
                 raw_mailbox,
             )
             rpc_mailboxes[name] = rpc_mailbox

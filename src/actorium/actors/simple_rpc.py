@@ -2,11 +2,12 @@ from abc import abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Self
 
+import msgspec
 from anyio import fail_after
 from msgspec import Struct
-from typing_extensions import TypeForm
 
 from actorium.actor import BaseActor, RawMailbox
+from actorium.logger import logger
 from actorium.runtime_generic import runtime_generic
 from actorium.serialization import deserialize, serialize
 from actorium.types import ActorAddress
@@ -45,30 +46,22 @@ class RpcActor[*I, O](BaseActor):
     """
 
     def actor_post_init(self, create_mailbox: Callable[[], RawMailbox]) -> None:
+        self._raw_mailbox: RawMailbox = create_mailbox()
+
         if TYPE_CHECKING:
-            i = I
-            o = O
+            self.mailbox = RpcMailbox[tuple[*I], O](self._raw_mailbox)
         else:
             i = self._typevar_to_args[I]
             o = self._typevar_to_args[O]
-
-        self._raw_mailbox: RawMailbox = create_mailbox()
-        self.mailbox = RpcMailbox[tuple[*i], o](
-            # Make sure that if `actor_ref` is overridden, that we take the
-            # message type from there.
-            RpcMessage[tuple[*i], o],
-            self._raw_mailbox,
-        )
+            self.mailbox = RpcMailbox[tuple[*i], o](self._raw_mailbox)
 
     def actor_ref(self) -> RpcRef[*I, O]:
         if TYPE_CHECKING:
-            i = I
-            o = O
+            return RpcRef[*I, O](actor_address=self._raw_mailbox.address)
         else:
             i = self._typevar_to_args[I]
             o = self._typevar_to_args[O]
-
-        return RpcRef[*i, o](actor_address=self._raw_mailbox.address)
+            return RpcRef[*i, o](actor_address=self._raw_mailbox.address)
 
     @abstractmethod
     async def actor_run(self) -> None:
@@ -81,13 +74,8 @@ class RpcMailbox[I: tuple[Any, ...], O]:
     Mailbox for a single actor from where the actor can receive messages.
     """
 
-    def __init__(
-        self,
-        message_type: TypeForm[RpcMessage[I, O]],
-        raw_mailbox: RawMailbox,
-    ) -> None:
+    def __init__(self, raw_mailbox: RawMailbox) -> None:
         assert hasattr(self, "_typevar_to_args")
-        self._message_type = message_type
         self._raw_mailbox = raw_mailbox
 
     def __aiter__(self) -> Self:
@@ -95,16 +83,26 @@ class RpcMailbox[I: tuple[Any, ...], O]:
 
     async def __anext__(self) -> RpcMessage[I, O]:
         if TYPE_CHECKING:
-            i = I
-            o = O
+            type_ = RpcMessage[I, O]
         else:
             i = self._typevar_to_args[I]
             o = self._typevar_to_args[O]
+            type_ = RpcMessage[i, o]
 
-        message = await self._raw_mailbox.next()
-
-        msg: RpcMessage[i, o] = deserialize(message, type=RpcMessage[i, o])
-        return msg
+        while True:
+            message = await self._raw_mailbox.next()
+            try:
+                msg: RpcMessage[I, O] = deserialize(message, type=type_)
+            except msgspec.ValidationError:
+                breakpoint()
+                logger.warning(
+                    "Cannot deserialize message in `RpcActor` mailbox type=%s, message=%s",
+                    repr(type_),
+                    repr(message[:30] + "..." if len(message) > 30 else message),
+                )
+                continue
+            else:
+                return msg
 
 
 @runtime_generic
@@ -126,17 +124,22 @@ class RpcRef[*I, O]:
         from actorium.system import _get_system
 
         if TYPE_CHECKING:
+            reply_to = Future[O]()
+            msg = RpcMessage[tuple[*I], O](
+                inputs=inputs,
+                reply_to=reply_to.actor,
+            )
+
+        else:
             i = self._typevar_to_args[I]
             o = self._typevar_to_args[O]
-        else:
-            i = I
-            o = O
 
-        reply_to = Future[o]()
-        msg = RpcMessage[tuple[*i], o](
-            inputs=inputs,
-            reply_to=reply_to.actor,
-        )
+            reply_to = Future[o]()
+            msg = RpcMessage[tuple[*i], o](
+                inputs=inputs,
+                reply_to=reply_to.actor,
+            )
+
         _get_system().call_actor_soon(self.actor_address, serialize(msg))
 
         with fail_after(timeout):

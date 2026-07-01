@@ -43,27 +43,31 @@ class SignalWriter[T](SimpleRef[T]):
 class Signal[T](BehaviorActor):
     def __init__(self, initial: T | _UndefinedType = Undefined) -> None:
         if TYPE_CHECKING:
-            t = T
+            self._subscriptions: TtlSet[SimpleRef[T]] = TtlSet[SimpleRef[T]]()
         else:
             t = self._typevar_to_args[T]
+            self._subscriptions: TtlSet[SimpleRef[T]] = TtlSet[SimpleRef[t]]()
 
         self._value = initial
-        self._subscriptions: TtlSet[SimpleRef[t]] = TtlSet()
-        self._get_waiters: set[Future[t]] = set()
+        self._get_waiters: set[Future[T]] = set()
 
     def actor_ref(self) -> tuple[SignalReader[T], SimpleRef[T]]:
         behavior_ref = super().actor_ref()
 
         if TYPE_CHECKING:
-            t = T
+            reader = SignalReader[T](
+                get=behavior_ref.get,
+                subscribe=behavior_ref.subscribe,
+                unsubscribe=behavior_ref.unsubscribe,
+            )
         else:
             t = self._typevar_to_args[T]
+            reader = SignalReader[t](
+                get=behavior_ref.get,
+                subscribe=behavior_ref.subscribe,
+                unsubscribe=behavior_ref.unsubscribe,
+            )
 
-        reader = SignalReader[t](
-            get=behavior_ref.get,
-            subscribe=behavior_ref.subscribe,
-            unsubscribe=behavior_ref.unsubscribe,
-        )
         writer = behavior_ref.set
         return reader, writer
 

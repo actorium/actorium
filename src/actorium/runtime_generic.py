@@ -112,7 +112,7 @@ def runtime_generic[T: type[Any]](type_: T) -> T:
             ),
         )
 
-    type_.__class_getitem__ = classmethod(__class_getitem__)
+    type_.__class_getitem__ = classmethod(__class_getitem__)  # type:ignore
     type_._generic_substitute_ = classmethod(_generic_substitute_)
     return type_
 
@@ -145,6 +145,6 @@ def _substitute_types(
 
     # If this is generic class.
     if hasattr(type_definition, "_generic_substitute_"):
-        return type_definition._generic_substitute_(typevar_to_args)
+        return type_definition._generic_substitute_(typevar_to_args)  # type:ignore
 
     return type_definition
